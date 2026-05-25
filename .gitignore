@@ -1,0 +1,25 @@
+# Secrets — NEVER commit these
+.env
+.env.*
+sa-key.json
+*.json
+!worker_tracker/*.json
+ig_cookies.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp

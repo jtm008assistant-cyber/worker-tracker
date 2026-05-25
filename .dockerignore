@@ -1,0 +1,16 @@
+# Don't ship secrets into the image
+.env
+.env.*
+sa-key.json
+ig_cookies.txt
+
+# Don't ship git history / dev junk into the image
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
+.vscode/
+*.md
