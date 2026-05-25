@@ -474,15 +474,15 @@ def schedule_pre_payroll_reviews() -> None:
     tz = ZoneInfo(config.MANAGER_TZ)
     scheduler.add_job(
         send_pre_payroll_review_dms, "cron",
-        day=14, hour=hh, minute=mm, timezone=tz,
-        id="prepayroll_review_14",
+        day=15, hour=hh, minute=mm, timezone=tz,
+        id="prepayroll_review_15",
     )
     scheduler.add_job(
         send_pre_payroll_review_dms, "cron",
         day="last", hour=hh, minute=mm, timezone=tz,
         id="prepayroll_review_eom",
     )
-    log.info("Pre-payroll review DMs scheduled: 14th + last-of-month at %s %s", config.PRE_PAYROLL_REVIEW_TIME, config.MANAGER_TZ)
+    log.info("Pre-payroll review DMs scheduled: 15th + last-of-month at %s %s", config.PRE_PAYROLL_REVIEW_TIME, config.MANAGER_TZ)
 
 
 def schedule_payroll() -> None:
@@ -492,14 +492,14 @@ def schedule_payroll() -> None:
     hh, mm = map(int, config.PAYROLL_RUN_TIME.split(":"))
     tz = ZoneInfo(config.MANAGER_TZ)
     if config.PAYROLL_PERIOD == "semimonthly":
-        # Pay on the 1st (covers prior 15th-EOM) and 15th (covers 1st-14th).
-        for day in (1, 15):
+        # Pay on the 1st (covers prior 16th-EOM) and 16th (covers 1st-15th).
+        for day in (1, 16):
             scheduler.add_job(
                 report.run_and_send_payroll, "cron",
                 day=day, hour=hh, minute=mm, timezone=tz,
                 id=f"payroll_day{day}",
             )
-        log.info("Payroll cron scheduled: 1st + 15th at %s %s", config.PAYROLL_RUN_TIME, config.MANAGER_TZ)
+        log.info("Payroll cron scheduled: 1st + 16th at %s %s", config.PAYROLL_RUN_TIME, config.MANAGER_TZ)
         return
     if config.PAYROLL_PERIOD in ("weekly", "biweekly"):
         # Run Monday morning (after Sunday-ending workweek closes).

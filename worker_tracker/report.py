@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import yagmail
 
-from . import config, sheets, analyzer, payroll
+from . import config, sheets, analyzer, payroll, fx
 
 log = logging.getLogger(__name__)
 
@@ -169,8 +169,18 @@ def send_payroll_digest(results: list[dict]) -> None:
 
     start = results[0]["period_start"].isoformat()
     end = results[0]["period_end"].isoformat()
-    total = sum(r["calc"]["gross_pay"] for r in results)
     currency = results[0]["worker"].get("currency", config.PAYROLL_DEFAULT_CURRENCY)
+
+    # Per-currency totals + USD-equivalent grand total
+    rates = fx.get_rates()
+    per_ccy_totals: dict[str, float] = {}
+    total_usd = 0.0
+    for r in results:
+        ccy = (r["worker"].get("currency") or config.PAYROLL_DEFAULT_CURRENCY).upper()
+        gross = float(r["calc"]["gross_pay"])
+        per_ccy_totals[ccy] = per_ccy_totals.get(ccy, 0.0) + gross
+        total_usd += fx.to_usd(gross, ccy, rates)
+    total = total_usd  # used for subject line
 
     # Pull any discrepancy reports workers flagged during this period
     all_activity = sheets.activity_rows(None)
@@ -283,8 +293,13 @@ def send_payroll_digest(results: list[dict]) -> None:
         f"</tr>"
         f"{''.join(rows_html)}"
         f"</table>"
-        f"<p style='font-family:sans-serif;font-size:130%;margin:14px 0'>"
-        f"Total payout: <b>{currency} {total:,.2f}</b></p>"
+        + (
+            f"<p style='font-family:sans-serif;font-size:130%;margin:14px 0'>"
+            f"Total payout (USD equivalent): <b>USD {total_usd:,.2f}</b><br>"
+            f"<span style='font-size:75%;color:#666'>By currency: "
+            + " · ".join(f"{ccy} {amt:,.2f}" for ccy, amt in sorted(per_ccy_totals.items()))
+            + "</span></p>"
+        )
 
         f"<h3 style='font-family:sans-serif;margin-top:24px'>Per-worker daily breakdown</h3>"
         f"{''.join(daily_html)}"
@@ -298,7 +313,7 @@ def send_payroll_digest(results: list[dict]) -> None:
     yag = yagmail.SMTP(config.GMAIL_USER, config.GMAIL_APP_PASSWORD)
     yag.send(
         to=recipients,
-        subject=f"Payroll {start} → {end} — {currency} {total:,.2f}",
+        subject=f"Payroll {start} → {end} — USD {total_usd:,.2f}",
         contents=html,
     )
     log.info("Payroll digest emailed to %s (%d workers, %s %.2f total)",

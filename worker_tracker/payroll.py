@@ -31,18 +31,18 @@ def period_bounds(period: str, ref: date) -> tuple[date, date]:
     Both dates are inclusive. End is always strictly before `ref`.
 
     Semimonthly schedule (the default for this project):
-    - Period A: 1st through 14th (paid on the 15th)
-    - Period B: 15th through end-of-month (paid on the 1st of next month)
+    - Period A: 1st through 15th (paid on the 16th)
+    - Period B: 16th through end-of-month (paid on the 1st of next month)
     """
     if period == "semimonthly":
-        if ref.day >= 15:
-            # Period A just closed (1st through 14th of this month)
+        if ref.day >= 16:
+            # Period A just closed (1st through 15th of this month)
             start = ref.replace(day=1)
-            end = ref.replace(day=14)
+            end = ref.replace(day=15)
             return start, end
-        # ref is between the 1st and 14th, so period B of LAST month just closed
+        # ref is between the 1st and 15th, so period B of LAST month just closed
         prev_eom = ref.replace(day=1) - timedelta(days=1)
-        start = prev_eom.replace(day=15)
+        start = prev_eom.replace(day=16)
         end = prev_eom
         return start, end
     if period == "weekly":
@@ -126,10 +126,10 @@ def current_open_period(period: str | None = None, ref: date | None = None) -> t
     period = period or config.PAYROLL_PERIOD
     ref = ref or datetime.now(ZoneInfo(config.MANAGER_TZ)).date()
     if period == "semimonthly":
-        if ref.day <= 14:
-            return ref.replace(day=1), ref.replace(day=14)
+        if ref.day <= 15:
+            return ref.replace(day=1), ref.replace(day=15)
         last = (ref.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
-        return ref.replace(day=15), last
+        return ref.replace(day=16), last
     # For other period types, return a sensible "this period" approximation
     if period == "weekly":
         days_since_mon = ref.weekday()
