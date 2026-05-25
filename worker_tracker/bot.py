@@ -32,6 +32,7 @@ _hours_query_re = re.compile("|".join(config.HOURS_QUERY_PATTERNS), re.IGNORECAS
 _discrepancy_re = re.compile("|".join(config.DISCREPANCY_PATTERNS), re.IGNORECASE)
 _admin_intro_re = re.compile("|".join(config.ADMIN_INTRODUCE_PATTERNS), re.IGNORECASE)
 _admin_status_re = re.compile("|".join(config.ADMIN_STATUS_PATTERNS), re.IGNORECASE)
+_admin_forward_re = re.compile("|".join(config.ADMIN_FORWARD_PATTERNS), re.IGNORECASE | re.DOTALL)
 
 scheduler = BackgroundScheduler()
 _app = None  # set in main()
@@ -329,6 +330,37 @@ def handle_message(event, client) -> None:
                 log.exception("status snapshot failed for %s", target["name"])
                 client.chat_postMessage(channel=user_id, text=f"hit an error checking on {target['name']}: {e}")
             return
+    # 'send to X: message' / 'tell norks his hours look off' — admin relay
+    if is_admin:
+        fm = _admin_forward_re.match(text)
+        if fm:
+            groups = [g for g in fm.groups() if g]
+            if len(groups) >= 2:
+                target_query = groups[0].strip()
+                message_to_send = groups[1].strip()
+                matches = _find_worker_by_name(target_query)
+                if not matches:
+                    client.chat_postMessage(channel=user_id, text=f"don't know who '{target_query}' is — check the roster?")
+                    return
+                if len(matches) > 1:
+                    names = ", ".join(w["name"] for w in matches)
+                    client.chat_postMessage(channel=user_id, text=f"multiple matches for '{target_query}': {names}. be more specific?")
+                    return
+                target = matches[0]
+                # Managers can't relay to owners
+                if is_manager and not is_owner and target["user_id"] in config.OWNER_SLACK_IDS:
+                    client.chat_postMessage(channel=user_id, text=f"can't relay messages to {target['name'].split()[0]} — owner-level only.")
+                    return
+                try:
+                    client.chat_postMessage(channel=target["user_id"], text=message_to_send)
+                    sheets.append_event(target["name"], target["user_id"], "admin_forward",
+                                       f"from {worker['name']}: {message_to_send[:100]}", target["tz"])
+                    client.chat_postMessage(channel=user_id, text=f"✓ sent to {target['name']}")
+                except Exception as e:
+                    log.exception("admin forward failed")
+                    client.chat_postMessage(channel=user_id, text=f"failed to send: {e}")
+                return
+
     # 'introduce everyone' — owners only (managers can't broadcast intros)
     if is_owner and _admin_intro_re.search(text):
         try:

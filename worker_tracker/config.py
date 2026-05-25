@@ -202,6 +202,15 @@ ADMIN_INTRODUCE_PATTERNS = (
     r"\bintro all\b",
 )
 
+# Admin can relay a message THROUGH Sam to a specific worker. Examples:
+#   "send to Jonny: get back to work"
+#   "tell norks his hours look wrong"
+#   "dm hannah: nice work today"
+#   "message Rey - check in pls"
+ADMIN_FORWARD_PATTERNS = (
+    r"^(?:send|dm|message|tell|forward)\s+(?:to\s+)?([A-Za-z][\w'.-]*)\s*[:,;-]?\s+(.+)$",
+)
+
 # Admins can ask "what is X doing" / "where's X" / "status of X" / etc.
 # The (.+?) captures the worker name (can be partial: "Hannah" matches "Hannah May Bagares").
 ADMIN_STATUS_PATTERNS = (
