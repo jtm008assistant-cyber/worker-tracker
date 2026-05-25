@@ -510,7 +510,7 @@ def handle_message(event, client) -> None:
         # On subsequent logins, skip — we already have it.
         schedule_q = ""
         if not sheets.load_profile(user_id):
-            schedule_q = "\n\nbtw what's your usual schedule? roughly when do you start and wrap up most days?"
+            schedule_q = " btw, what's your usual schedule? roughly when do you start and wrap up most days?"
 
         client.chat_postMessage(
             channel=user_id,
@@ -518,6 +518,7 @@ def handle_message(event, client) -> None:
                 f"hey {first}! got you in 🙌 I'll loop back every {cadence} to see "
                 f"how things are going. shoot me 'EOD' whenever you wrap up."
                 + view_intro
+                + f"\n\nso what's on your plate today? give me a quick idea of what you're tackling."
                 + schedule_q
             ),
         )
