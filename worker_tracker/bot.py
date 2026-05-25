@@ -160,15 +160,22 @@ def mark_missed(user_id: str) -> None:
 
 
 def handle_message(event, client) -> None:
+    log.info("[EVENT RECEIVED] type=%s channel_type=%s user=%s text=%r subtype=%s bot_id=%s",
+             event.get("type"), event.get("channel_type"), event.get("user"),
+             event.get("text"), event.get("subtype"), event.get("bot_id"))
     if event.get("channel_type") != "im":
+        log.info("  -> ignored (not a DM)")
         return
     if event.get("bot_id") or event.get("subtype"):
+        log.info("  -> ignored (from bot or has subtype)")
         return
 
     user_id = event.get("user")
     text = (event.get("text") or "").strip()
     if not user_id:
+        log.info("  -> ignored (no user_id)")
         return
+    log.info("  -> handling as worker DM from %s", user_id)
 
     if user_id not in WORKERS:
         reload_roster()
