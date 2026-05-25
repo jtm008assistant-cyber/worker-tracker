@@ -393,60 +393,95 @@ Rules:
 
 
 def conversational_reply(message: str, speaker_name: str, is_owner: bool,
-                          is_manager: bool) -> str | None:
-    """Generate a natural conversational reply for messages that didn't match any
-    specific command pattern. Used so admins can chat with Sam without getting
-    boilerplate responses. Returns None to stay silent.
+                          is_manager: bool, is_worker: bool = False,
+                          recent_context: str = "") -> str | None:
+    """Generate a useful conversational reply for messages that didn't match a
+    specific command pattern. Returns None to stay silent.
     """
     if not config.GOOGLE_API_KEY or not message.strip():
         return None
 
-    role = "an OWNER (Jan or Ideen) — full admin access" if is_owner else (
-        "a MANAGER (Hannah) — can query workers but not owners" if is_manager
-        else "a worker being time-tracked")
+    if is_owner:
+        role_block = (
+            f"{speaker_name} is an OWNER. They can ask you about any worker, "
+            f"trigger team-wide actions ('introduce everyone'), and chat casually."
+        )
+        capabilities = (
+            "Owner-only commands:\n"
+            "• 'introduce everyone' → broadcast onboarding DMs\n"
+            "• 'send to <worker>: <msg>' → relay a message through you\n\n"
+            "Shared admin commands (also for managers):\n"
+            "• 'what is <worker> doing' / 'status of <worker>' → live snapshot\n"
+            "• 'hours' → see your own pay-period hours\n"
+        )
+    elif is_manager:
+        role_block = (
+            f"{speaker_name} is a MANAGER. They can query workers but cannot "
+            f"query or relay to owners. They also work normal shifts."
+        )
+        capabilities = (
+            "Manager + worker capabilities:\n"
+            "• 'what is <worker> doing' / 'status of <worker>' (workers only, not owners)\n"
+            "• 'send to <worker>: <msg>' (workers only, not owners)\n"
+            "• 'hours' → your own pay-period hours\n"
+            "• Normal worker flow: message to clock in, 'break' to pause, 'EOD' to wrap\n"
+        )
+    else:
+        role_block = (
+            f"{speaker_name} is a WORKER being time-tracked. They DM you to "
+            f"clock in, take breaks, and EOD. They CANNOT query other workers "
+            f"or trigger admin actions."
+        )
+        capabilities = (
+            "What workers can do:\n"
+            "• Message you anything to clock in for the day\n"
+            "• Say 'break', 'lunch', 'brb' to pause the clock\n"
+            "• Any message after a break resumes the clock\n"
+            "• Say 'EOD', 'done my shift', 'im out' to wrap up\n"
+            "• Ask 'hours' to see their pay-period total\n"
+            "• Flag discrepancies ('you missed my lunch', 'should be 8h not 7') for Jan to review\n"
+        )
 
-    prompt = f"""You are Sam, an AI ops assistant for a small team at Hey Girl Tea.
-Your main job is time tracking via Slack DMs: workers DM you to clock in,
-take breaks, EOD, and you check in every ~2h asking what they're working on.
+    ctx_block = f"\nRecent context for this worker:\n{recent_context}\n" if recent_context else ""
 
-The person messaging you is {speaker_name}, {role}.
+    prompt = f"""You are Sam, the AI ops assistant for Hey Girl Tea. Your main
+job is time tracking: workers DM you to clock in, take breaks, and end their
+day. Every pay period your hour log goes to Ideen for payroll.
 
-Their message just now:
+WHO IS MESSAGING:
+{role_block}
+
+THEIR MESSAGE:
 "{message.strip()}"
+{ctx_block}
+YOUR CAPABILITIES:
+{capabilities}
 
-This message didn't match any of your specific patterns (not a check-in,
-not EOD, not a break, not an admin command, not a hours-query, not a
-discrepancy report). It's probably conversational.
+YOUR VOICE:
+- Warm but tight. Lowercase. Like a thoughtful coworker, not a chatbot.
+- 1-3 sentences max. NEVER lists/bullets in chat replies.
+- Don't say "I can help with that!" or other filler — just answer.
+- Concrete > generic. If they ask "what should I do" — name the actual thing.
+- Match their energy: short reply for short message, longer if they ask a real question.
 
-Respond like a warm, helpful teammate — lowercase, casual, 1-3 sentences max.
-NEVER be corporate or robotic. If they ask what you can do, mention the
-specific command. If it's small talk, chat back lightly. If they ask
-something outside your skills (jokes, life advice, etc.), play along briefly
-but don't pretend to be more than you are.
-
-What you can do (only mention if relevant):
-- Time tracking + payroll handoff to Ideen on 1st + 16th
-- Admins: ask "what is X doing" / "status of Hannah" → live snapshot
-- Owners: ask "introduce everyone" → broadcast onboarding intros
-- Anyone: ask "hours" to see current pay-period hours
-- Flag discrepancies if hours look wrong
-- Daily AI EOD digest + weekly profile synthesis (sent to Jan)
-
-Respond with ONLY the reply text — no quotes, no preamble, no JSON. If no
-reply makes sense (e.g., they sent a single emoji or 'ok'), respond with
-just: SKIP
+RULES:
+- If their message is genuinely about your capabilities or how to use you, answer the actual question. Don't be vague.
+- If they ask about something outside your tools (jokes, life advice, weather), play along briefly but redirect to what you can do.
+- If they're complaining/frustrated, acknowledge it directly. Don't be saccharine.
+- If they ask a question YOU can answer with data (e.g. "what's my latest check-in"), say so but flag that you can't actually pull that until they teach you how (i.e. don't hallucinate data).
+- Output the REPLY ONLY. No quotes, no preamble, no JSON.
+- If nothing useful to say (e.g. just an emoji or 'ok'), output: SKIP
 """
     try:
         client = genai.Client(api_key=config.GOOGLE_API_KEY)
         resp = client.models.generate_content(
             model=config.GEMINI_MODEL,
             contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=800),
+            config=types.GenerateContentConfig(temperature=0.6, max_output_tokens=600),
         )
         reply = (resp.text or "").strip()
         if not reply or reply.upper() == "SKIP":
             return None
-        # Strip surrounding quotes if Gemini added them
         if (reply.startswith('"') and reply.endswith('"')) or (reply.startswith("'") and reply.endswith("'")):
             reply = reply[1:-1]
         return reply

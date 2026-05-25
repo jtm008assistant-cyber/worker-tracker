@@ -572,15 +572,16 @@ def handle_message(event, client) -> None:
             )
         except Exception:
             pass
-    elif is_admin:
-        # Admins (Jan, Ideen, Hannah) get conversational replies for anything
-        # that didn't match a specific command. Workers stay in the structured flow.
+    else:
+        # Everyone — admins AND workers — gets a real conversational reply for
+        # things that didn't match a specific command. Different prompts per role.
         try:
             reply = analyzer.conversational_reply(
                 message=text,
                 speaker_name=worker["name"],
                 is_owner=is_owner,
                 is_manager=is_manager and not is_owner,
+                is_worker=not (is_owner or is_manager),
             )
             if reply:
                 client.chat_postMessage(channel=user_id, text=reply)

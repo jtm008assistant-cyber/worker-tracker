@@ -156,10 +156,11 @@ EOD_PATTERNS = (
 )
 
 HELP_PATTERNS = (
-    r"\bhelp\b", r"\bstuck\b", r"\bblocked\b", r"\bissue\b", r"\bproblem\b",
-    r"\bcan'?t\b", r"\bnot sure\b", r"\bconfused\b", r"\bbroken\b",
-    r"\berror\b", r"\bdoesn'?t work\b",
-    # Note: removed bare "?" — questions on their own aren't help requests
+    # Tightened — these need specific phrasing so casual chat doesn't trigger help-flags
+    r"\bneed help\b", r"\bcan you help\b", r"\bplease help\b",
+    r"\bstuck on\b", r"\bblocked on\b", r"\bgetting stuck\b",
+    r"\bbroken\b", r"\berror\b", r"\bdoesn'?t work\b", r"\bnot working\b",
+    r"\b(?:big )?problem with\b", r"\bissue with\b",
 )
 
 BREAK_START_PATTERNS = (
