@@ -280,12 +280,17 @@ def send_payroll_digest(results: list[dict]) -> None:
             f"</table></div>"
         )
 
+    per_ccy_str = " · ".join(f"{ccy} {amt:,.2f}" for ccy, amt in sorted(per_ccy_totals.items()))
+    usd_total_block = (
+        f"<p style='font-family:sans-serif;font-size:130%;margin:14px 0'>"
+        f"Total payout (USD equivalent): <b>USD {total_usd:,.2f}</b><br>"
+        f"<span style='font-size:75%;color:#666'>By currency: {per_ccy_str}</span></p>"
+    )
+
     html = (
         f"<h2 style='font-family:sans-serif'>Payroll — {start} → {end}</h2>"
         f"<p style='font-family:sans-serif;color:#555'>Auto-generated. Detail in the Timesheet tab of the Payroll sheet.</p>"
-
         f"{discrepancy_html}"
-
         f"<h3 style='font-family:sans-serif;margin-top:18px'>Summary</h3>"
         f"<table border='1' cellpadding='8' style='border-collapse:collapse;font-family:sans-serif;font-size:14px'>"
         f"<tr style='background:#222;color:#fff'>"
@@ -293,14 +298,7 @@ def send_payroll_digest(results: list[dict]) -> None:
         f"</tr>"
         f"{''.join(rows_html)}"
         f"</table>"
-        + (
-            f"<p style='font-family:sans-serif;font-size:130%;margin:14px 0'>"
-            f"Total payout (USD equivalent): <b>USD {total_usd:,.2f}</b><br>"
-            f"<span style='font-size:75%;color:#666'>By currency: "
-            + " · ".join(f"{ccy} {amt:,.2f}" for ccy, amt in sorted(per_ccy_totals.items()))
-            + "</span></p>"
-        )
-
+        f"{usd_total_block}"
         f"<h3 style='font-family:sans-serif;margin-top:24px'>Per-worker daily breakdown</h3>"
         f"{''.join(daily_html)}"
     )
