@@ -54,7 +54,9 @@ def _intro_message(worker: dict, view_url: str | None) -> str:
         )
 
     return (
-        f"hey {first} 👋 I'm Sam — I help the team stay in sync on what everyone's working on.\n\n"
+        f"hey {first} 👋 I'm Sam — your new time tracker. I'll help the team stay in sync on "
+        f"what everyone's working on, and every pay period I send your hours straight to Ideen "
+        f"for payroll.\n\n"
         f"quick rundown so you know what to expect:\n\n"
         f"📩 *message me when you start your shift* — anything works, just say \"hi\" or \"starting\"\n"
         f"🔄 *every {cadence}* I'll check in to ask what you got done. reply with whatever you actually "
@@ -65,6 +67,9 @@ def _intro_message(worker: dict, view_url: str | None) -> str:
         f"• \"hours\" — see your hours so far this pay period\n"
         f"• if any hours look wrong, just tell me what's off and I'll flag it for Jan to review before payroll runs\n"
         f"{view_block}\n\n"
+        f"💸 *at the end of each pay period (the 15th and end of the month), your hours go directly "
+        f"to Ideen who handles payments* — so your check-ins are what drive your payout. keep them honest, "
+        f"keep them consistent, and everything flows smoothly.\n\n"
         f"last thing — what's your usual schedule? roughly when do you start and wrap most days? "
         f"helps me set expectations.\n\n"
         f"we're good to go whenever you start your next shift 🙌"
