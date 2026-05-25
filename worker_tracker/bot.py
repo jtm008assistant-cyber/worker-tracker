@@ -249,10 +249,23 @@ def send_prompt(user_id: str) -> None:
     if not worker or _app is None:
         return
     first = worker["name"].split()[0] if worker["name"] else "friend"
-    text = (
-        f"hey {first} 👋 quick one — what'd you knock out the last bit? "
-        f"all good or stuck on anything?"
-    )
+
+    # Try a Gemini-generated contextual prompt that references the worker's
+    # most recent check-in. Falls back to the generic prompt if Gemini fails.
+    text = None
+    try:
+        today = _local_today(worker)
+        today_events = [r for r in sheets.activity_rows(today) if r.get("Slack User ID") == user_id]
+        today_events.sort(key=lambda r: r.get("Timestamp UTC", ""))
+        text = analyzer.generate_checkin_prompt(worker, today_events)
+    except Exception:
+        log.exception("contextual check-in prompt failed for %s; falling back", user_id)
+
+    if not text:
+        text = (
+            f"hey {first} 👋 quick one — what'd you knock out the last bit? "
+            f"all good or stuck on anything?"
+        )
     try:
         _app.client.chat_postMessage(channel=user_id, text=text)
         sheets.append_event(worker["name"], user_id, "prompt_sent", "", worker["tz"])

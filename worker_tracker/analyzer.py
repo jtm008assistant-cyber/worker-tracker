@@ -392,6 +392,84 @@ Rules:
     return cleaned
 
 
+def generate_checkin_prompt(worker: dict, today_events: list[dict]) -> str | None:
+    """Generate a contextual check-in DM that references the worker's recent
+    activity. Returns None on failure so caller can fall back to generic prompt.
+    """
+    if not config.GOOGLE_API_KEY:
+        return None
+
+    first = (worker.get("name") or "friend").split()[0]
+
+    # Reconstruct today's state from event log
+    last_login = None
+    last_checkin_text = None
+    last_checkin_time = None
+    plan_text = None  # the first checkin after login = their "plan for the day"
+    for e in today_events:
+        t = e.get("Type", "")
+        ts_str = e.get("Local Time", "")
+        msg = e.get("Message", "")
+        if t == "login":
+            last_login = ts_str
+        elif t in ("checkin", "help_request"):
+            if last_login and not plan_text:
+                plan_text = msg
+            last_checkin_text = msg
+            last_checkin_time = ts_str
+
+    context_lines = [f"Worker: {first}", f"Their TZ: {worker.get('tz', 'UTC')}"]
+    if last_login:
+        context_lines.append(f"Logged in today at: {last_login}")
+    if plan_text and plan_text != last_checkin_text:
+        context_lines.append(f"Plan they shared at login: \"{plan_text[:200]}\"")
+    if last_checkin_text:
+        context_lines.append(f"Their most recent check-in (at {last_checkin_time}): \"{last_checkin_text[:250]}\"")
+    else:
+        context_lines.append("(no check-in replies yet today)")
+
+    prompt = f"""You are Sam, an AI ops assistant for Hey Girl Tea. You're about to send
+a periodic check-in DM to a worker to see what they've been doing in the
+last ~2 hours. This is the kind of DM that gets sent automatically every
+couple hours during their shift.
+
+DON'T sound like a robot. Reference what they said last (so they feel heard),
+keep it warm, lowercase, casual. 1 sentence, ≤25 words. Use their first name
+in lowercase.
+
+CONTEXT:
+{chr(10).join(context_lines)}
+
+GOOD examples (warm, contextual, short):
+- "hey rey, last I heard you were on the customer review pipeline — still on that or onto something else?"
+- "yo norks, how's it going? any wins, any blockers from the last bit?"
+- "hey ger 👋 anything to flag, or smooth sailing this stretch?"
+- "hey hannah, you mentioned the lead tracker earlier — get through it, or still digging?"
+
+BAD examples (robotic, generic, doesn't reference context):
+- "Hi Rey. Please describe what you have been working on."
+- "hey rey 👋 quick one — what'd you knock out the last bit? all good or stuck on anything?"
+
+Output ONLY the prompt text — no quotes, no preamble, no JSON.
+"""
+    try:
+        client = genai.Client(api_key=config.GOOGLE_API_KEY)
+        resp = client.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+            config=types.GenerateContentConfig(temperature=0.8, max_output_tokens=300),
+        )
+        reply = (resp.text or "").strip()
+        if not reply:
+            return None
+        if (reply.startswith('"') and reply.endswith('"')) or (reply.startswith("'") and reply.endswith("'")):
+            reply = reply[1:-1]
+        return reply
+    except Exception as e:
+        log.warning("generate_checkin_prompt failed for %s: %s", first, e)
+        return None
+
+
 def conversational_reply(message: str, speaker_name: str, is_owner: bool,
                           is_manager: bool, is_worker: bool = False,
                           recent_context: str = "") -> str | None:
