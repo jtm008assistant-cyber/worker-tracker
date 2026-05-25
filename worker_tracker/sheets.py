@@ -98,7 +98,9 @@ def load_roster() -> List[dict]:
             "tz": str(r.get("Timezone") or "UTC").strip(),
             "expected_start": str(r.get("Expected Start") or "").strip(),
             "expected_eod": str(r.get("Expected EOD") or "").strip(),
-            "pay_type": (str(r.get("Pay Type") or "hourly").strip().lower() or "hourly"),
+            # Accept "salary" or "salaried" as the same thing; normalize for downstream code
+            "pay_type": ("salaried" if str(r.get("Pay Type") or "hourly").strip().lower() in ("salary", "salaried")
+                         else (str(r.get("Pay Type") or "hourly").strip().lower() or "hourly")),
             "hourly_rate": _f("Hourly Rate"),
             "salary_per_period": _f("Salary (per period)"),
             "currency": str(r.get("Currency") or config.PAYROLL_DEFAULT_CURRENCY).strip(),
