@@ -76,6 +76,59 @@ def _intro_message(worker: dict, view_url: str | None) -> str:
     )
 
 
+def _owner_intro_message(first_name: str) -> str:
+    """Intro DM for an owner (Ideen-style). Explains admin commands + payroll cadence.
+    Different from the worker intro — assumes they're not being tracked themselves."""
+    return (
+        f"hey {first_name} 👋 I'm Sam — Jan brought me on as the team's new time tracker. "
+        f"I keep tabs on what everyone's working on, hand the hours to you on the 1st and 16th "
+        f"for payroll, and surface daily AI notes on who's stretched, slacking, or stuck.\n\n"
+        f"things you can do anytime — just DM me:\n"
+        f"• *\"what is Hannah doing\"* / *\"status of Rey\"* / *\"how's Jonny doing\"* → live snapshot of any worker\n"
+        f"• *\"introduce everyone\"* → broadcasts onboarding intros to the team (idempotent — safe to re-run)\n\n"
+        f"📧 *payroll digest* lands in your inbox on the 1st and 16th — full breakdown by worker with "
+        f"payout emails ready to copy/paste into Wise (or e-transfer for Jonny).\n\n"
+        f"🔒 Hannah's set up as a manager — she can query workers but can't see anything about you "
+        f"or Jan. so you've got privacy on your side too.\n\n"
+        f"that's the rundown. drop me a *\"what is Hannah doing\"* anytime to test 🙌"
+    )
+
+
+def send_owner_introductions(force: bool = False) -> dict:
+    """DM each OWNER who's NOT on the roster (e.g. Ideen) with the owner-flavored intro.
+    Owners who are on the roster get the regular worker intro via send_introductions."""
+    if not config.SLACK_BOT_TOKEN:
+        return {}
+    client = WebClient(token=config.SLACK_BOT_TOKEN)
+    roster_uids = {w["user_id"] for w in sheets.load_roster()}
+    results: dict[str, str] = {}
+    for uid in config.OWNER_SLACK_IDS:
+        if uid in roster_uids:
+            # They'll get the worker intro via send_introductions
+            continue
+        if not force and _already_introduced(uid):
+            results[uid] = "skipped (already introduced)"
+            continue
+        try:
+            # Look up their real Slack name
+            user_info = client.users_info(user=uid)
+            real_name = user_info["user"]["profile"].get("real_name", "")
+            first_name = real_name.split()[0] if real_name else "there"
+        except Exception:
+            real_name = uid
+            first_name = "there"
+        try:
+            client.chat_postMessage(channel=uid, text=_owner_intro_message(first_name))
+            sheets.append_event(real_name or uid, uid, "introduced", "owner intro DM sent", "UTC")
+            results[uid] = f"sent ({real_name or 'unknown name'})"
+            log.info("Introduced owner %s (%s)", real_name or uid, uid)
+        except SlackApiError as e:
+            err = e.response.get("error", str(e))
+            results[uid] = f"failed: {err}"
+            log.exception("Failed to DM owner %s", uid)
+    return results
+
+
 def send_introductions(only_worker_id: str | None = None, force: bool = False) -> dict:
     """DM each active worker an introduction. Skips already-introduced unless force=True.
 

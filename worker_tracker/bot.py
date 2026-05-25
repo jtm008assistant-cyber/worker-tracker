@@ -332,15 +332,24 @@ def handle_message(event, client) -> None:
         except Exception:
             pass
         try:
-            results = onboarding.send_introductions()
-            sent = [n for n, s in results.items() if s == "sent"]
-            skipped = [n for n, s in results.items() if "skipped" in s]
-            failed = [(n, s) for n, s in results.items() if "failed" in s]
-            summary_lines = [f"done! intros sent to {len(sent)} worker(s):"]
-            for n in sent:
-                summary_lines.append(f"  ✓ {n}")
+            worker_results = onboarding.send_introductions()
+            owner_results = onboarding.send_owner_introductions()
+            sent_workers = [n for n, s in worker_results.items() if s == "sent"]
+            sent_owners = [s for s in owner_results.values() if s.startswith("sent")]
+            skipped = [n for n, s in worker_results.items() if "skipped" in s] + \
+                      [k for k, s in owner_results.items() if "skipped" in s]
+            failed = [(n, s) for n, s in {**worker_results, **owner_results}.items() if "failed" in s]
+            summary_lines = [f"done! 🎉"]
+            if sent_workers:
+                summary_lines.append(f"workers intro'd ({len(sent_workers)}):")
+                for n in sent_workers:
+                    summary_lines.append(f"  ✓ {n}")
+            if sent_owners:
+                summary_lines.append(f"\nowners intro'd ({len(sent_owners)}):")
+                for s in sent_owners:
+                    summary_lines.append(f"  ✓ {s.replace('sent (', '').rstrip(')')}")
             if skipped:
-                summary_lines.append(f"\nskipped (already introduced): {', '.join(skipped)}")
+                summary_lines.append(f"\nskipped (already introduced): {len(skipped)}")
             if failed:
                 summary_lines.append("\nfailed:")
                 for n, s in failed:
