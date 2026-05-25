@@ -74,9 +74,8 @@ def send_prompt(user_id: str) -> None:
         return
     first = worker["name"].split()[0] if worker["name"] else "friend"
     text = (
-        f"Hey {first} — quick check-in. What did you get done in the last "
-        f"~{config.CHECKIN_INTERVAL_MINUTES // 60}h {config.CHECKIN_INTERVAL_MINUTES % 60}m, "
-        f"and is anything blocking you?"
+        f"hey {first} 👋 quick one — what'd you knock out the last bit? "
+        f"all good or stuck on anything?"
     )
     try:
         _app.client.chat_postMessage(channel=user_id, text=text)
@@ -123,7 +122,11 @@ def handle_message(event, client) -> None:
             try:
                 client.chat_postMessage(
                     channel=user_id,
-                    text=f"You're not on the roster yet. Tell your manager your Slack User ID: `{user_id}`.",
+                    text=(
+                        f"hey, I'm Sam 👋 I help the team stay in sync on what everyone's "
+                        f"working on. I don't have you on my list yet though — send your "
+                        f"manager your Slack ID so they can add you: `{user_id}`"
+                    ),
                 )
             except Exception:
                 pass
@@ -150,8 +153,8 @@ def handle_message(event, client) -> None:
         client.chat_postMessage(
             channel=user_id,
             text=(
-                f"Logged you out, {first}. {summary['active_hours']}h active, "
-                f"{len(summary['checkins'])} check-ins. Talk tomorrow."
+                f"alright {first}, you're out 👋 {summary['active_hours']}h, "
+                f"{len(summary['checkins'])} check-ins. catch you tomorrow."
             ),
         )
         return
@@ -167,8 +170,8 @@ def handle_message(event, client) -> None:
         client.chat_postMessage(
             channel=user_id,
             text=(
-                f"Got it, {first} — clocked you in. I'll check in every {cadence}. "
-                f"Message 'EOD' when you're done."
+                f"hey {first}! got you in 🙌 I'll loop back every {cadence} to see "
+                f"how things are going. shoot me 'EOD' whenever you wrap up."
             ),
         )
         return
