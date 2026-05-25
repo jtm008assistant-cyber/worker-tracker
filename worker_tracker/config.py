@@ -33,6 +33,9 @@ SHEETS_FOLDER_ID = os.environ.get("SHEETS_FOLDER_ID")
 
 TRACKER_SHEET_ID = os.environ.get("WORKER_TRACKER_SHEET_ID")
 PAYROLL_SHEET_ID = os.environ.get("PAYROLL_SHEET_ID")
+# Separate subfolder for per-worker view sheets so they're not mixed with admin sheets.
+# Falls back to SHEETS_FOLDER_ID if not set.
+WORKER_VIEWS_FOLDER_ID = os.environ.get("WORKER_VIEWS_FOLDER_ID") or os.environ.get("SHEETS_FOLDER_ID")
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN")
@@ -63,6 +66,7 @@ ACTIVITY_TAB = "Activity Log"
 SUMMARY_TAB = "Daily Summary"
 PROFILE_TAB = "Worker Profile"
 KNOWLEDGE_TAB = "Processes & Tools"
+LIBRARY_TAB = "Knowledge Library"
 
 ROSTER_HEADER = [
     "Name", "Slack User ID", "Work Email", "Payout Email", "Payout Method",
@@ -90,6 +94,13 @@ KNOWLEDGE_HEADER = [
     "Worker", "Slack User ID", "Kind", "Name", "URL",
     "Description", "Steps / Notes",
     "First Mentioned", "Last Updated", "Times Referenced",
+]
+
+# Aggregated company-wide view, one row per unique tool/process across all workers.
+LIBRARY_HEADER = [
+    "Tool / Process Name", "Kind", "URL",
+    "Description (latest)", "Used By", "# of Users",
+    "Total References", "First Seen", "Last Updated",
 ]
 
 # How aggressively Sam asks follow-up questions when workers mention unfamiliar things
@@ -147,7 +158,8 @@ EOD_PATTERNS = (
 HELP_PATTERNS = (
     r"\bhelp\b", r"\bstuck\b", r"\bblocked\b", r"\bissue\b", r"\bproblem\b",
     r"\bcan'?t\b", r"\bnot sure\b", r"\bconfused\b", r"\bbroken\b",
-    r"\berror\b", r"\bdoesn'?t work\b", r"\?",
+    r"\berror\b", r"\bdoesn'?t work\b",
+    # Note: removed bare "?" — questions on their own aren't help requests
 )
 
 BREAK_START_PATTERNS = (

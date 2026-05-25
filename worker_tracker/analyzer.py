@@ -392,6 +392,69 @@ Rules:
     return cleaned
 
 
+def conversational_reply(message: str, speaker_name: str, is_owner: bool,
+                          is_manager: bool) -> str | None:
+    """Generate a natural conversational reply for messages that didn't match any
+    specific command pattern. Used so admins can chat with Sam without getting
+    boilerplate responses. Returns None to stay silent.
+    """
+    if not config.GOOGLE_API_KEY or not message.strip():
+        return None
+
+    role = "an OWNER (Jan or Ideen) — full admin access" if is_owner else (
+        "a MANAGER (Hannah) — can query workers but not owners" if is_manager
+        else "a worker being time-tracked")
+
+    prompt = f"""You are Sam, an AI ops assistant for a small team at Hey Girl Tea.
+Your main job is time tracking via Slack DMs: workers DM you to clock in,
+take breaks, EOD, and you check in every ~2h asking what they're working on.
+
+The person messaging you is {speaker_name}, {role}.
+
+Their message just now:
+"{message.strip()}"
+
+This message didn't match any of your specific patterns (not a check-in,
+not EOD, not a break, not an admin command, not a hours-query, not a
+discrepancy report). It's probably conversational.
+
+Respond like a warm, helpful teammate — lowercase, casual, 1-3 sentences max.
+NEVER be corporate or robotic. If they ask what you can do, mention the
+specific command. If it's small talk, chat back lightly. If they ask
+something outside your skills (jokes, life advice, etc.), play along briefly
+but don't pretend to be more than you are.
+
+What you can do (only mention if relevant):
+- Time tracking + payroll handoff to Ideen on 1st + 16th
+- Admins: ask "what is X doing" / "status of Hannah" → live snapshot
+- Owners: ask "introduce everyone" → broadcast onboarding intros
+- Anyone: ask "hours" to see current pay-period hours
+- Flag discrepancies if hours look wrong
+- Daily AI EOD digest + weekly profile synthesis (sent to Jan)
+
+Respond with ONLY the reply text — no quotes, no preamble, no JSON. If no
+reply makes sense (e.g., they sent a single emoji or 'ok'), respond with
+just: SKIP
+"""
+    try:
+        client = genai.Client(api_key=config.GOOGLE_API_KEY)
+        resp = client.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+            config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=800),
+        )
+        reply = (resp.text or "").strip()
+        if not reply or reply.upper() == "SKIP":
+            return None
+        # Strip surrounding quotes if Gemini added them
+        if (reply.startswith('"') and reply.endswith('"')) or (reply.startswith("'") and reply.endswith("'")):
+            reply = reply[1:-1]
+        return reply
+    except Exception as e:
+        log.warning("conversational_reply failed for %s: %s", speaker_name, e)
+        return None
+
+
 def synthesize_weekly_profile(name: str, slack_user_id: str, first_seen: str,
                               prior_profile: dict | None,
                               recent_summaries: list[dict],

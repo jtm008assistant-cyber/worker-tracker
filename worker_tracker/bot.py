@@ -534,6 +534,20 @@ def handle_message(event, client) -> None:
             )
         except Exception:
             pass
+    elif is_admin:
+        # Admins (Jan, Ideen, Hannah) get conversational replies for anything
+        # that didn't match a specific command. Workers stay in the structured flow.
+        try:
+            reply = analyzer.conversational_reply(
+                message=text,
+                speaker_name=worker["name"],
+                is_owner=is_owner,
+                is_manager=is_manager and not is_owner,
+            )
+            if reply:
+                client.chat_postMessage(channel=user_id, text=reply)
+        except Exception:
+            log.exception("conversational reply failed for %s", worker["name"])
 
     # --- Knowledge / follow-up handling ---
     try:
