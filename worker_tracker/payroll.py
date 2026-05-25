@@ -178,6 +178,13 @@ def run_payroll(period: str | None = None, ref: date | None = None) -> list[dict
     generated_at = datetime.now(ZoneInfo(config.MANAGER_TZ)).isoformat(timespec="seconds")
 
     for w in roster:
+        # Skip workers with no compensation set — they're tracked-only (e.g. owner/manager
+        # who wants daily EOD insights but isn't on any payout).
+        hourly_rate = float(w.get("hourly_rate") or 0)
+        salary = float(w.get("salary_per_period") or 0)
+        if hourly_rate == 0 and salary == 0:
+            log.info("Skipping %s from payroll — no rate or salary set (tracked-only)", w["name"])
+            continue
         worker_rows = [
             r for r in sheets.summaries_in_range(start.isoformat(), end.isoformat())
             if str(r.get("Worker", "")).strip() == w["name"]
