@@ -33,6 +33,8 @@ EMPTY_DAILY = {
     "capacity_signal": "",
 }
 
+URL_RE = __import__("re").compile(r"https?://[^\s<>\"']+")
+
 
 def _strip_codefence(text: str) -> str:
     text = text.strip()
@@ -82,13 +84,15 @@ def _profile_context_block(profile: dict | None) -> str:
 def _build_daily_prompt(name: str, login_local: str, eod_local: str, active_hours: float,
                         help_count: int, missed: int,
                         checkins: Iterable[tuple[datetime, str]],
-                        profile: dict | None) -> str:
+                        profile: dict | None,
+                        knowledge: list[dict] | None = None) -> str:
     lines = [
         f"[{t.strftime('%H:%M')}] {m.strip() or '(empty reply)'}"
         for t, m in checkins
     ]
     checkin_block = "\n".join(lines) if lines else "(no check-in replies recorded)"
     profile_block = _profile_context_block(profile)
+    knowledge_block = _knowledge_block(knowledge or [])
     return f"""You are this worker's AI ops/HR analyst. You audit their day to help the
 manager spot two things:
 1. Tasks that could be AUTOMATED (specific scripts, no-code tools, AI prompts, integrations).
@@ -100,6 +104,8 @@ AGAIN today, call that out explicitly ("repeat: X was flagged on
 {{date}} and they're still doing it manually").
 
 {profile_block}
+
+{knowledge_block}
 
 TODAY:
 Worker: {name}
@@ -127,7 +133,8 @@ Rules:
 def analyze(name: str, login_local: str, eod_local: str, active_hours: float,
             help_count: int, missed: int,
             checkins: list[tuple[datetime, str]],
-            profile: dict | None = None) -> dict:
+            profile: dict | None = None,
+            knowledge: list[dict] | None = None) -> dict:
     """Daily analysis. Never raises. profile is the persistent Worker Profile row."""
     if not config.GOOGLE_API_KEY:
         log.info("No GOOGLE_API_KEY; skipping Gemini analysis for %s", name)
@@ -136,7 +143,7 @@ def analyze(name: str, login_local: str, eod_local: str, active_hours: float,
         return dict(EMPTY_DAILY)
     try:
         data = _gemini_json(_build_daily_prompt(
-            name, login_local, eod_local, active_hours, help_count, missed, checkins, profile,
+            name, login_local, eod_local, active_hours, help_count, missed, checkins, profile, knowledge,
         ))
     except Exception as e:
         log.warning("Gemini daily analysis failed for %s: %s", name, e)
@@ -225,6 +232,164 @@ Rules:
 - Pull evidence from THIS WEEK; do not invent.
 - Output ONLY the JSON.
 """
+
+
+def _knowledge_block(knowledge: list[dict]) -> str:
+    if not knowledge:
+        return "Known tools/processes for this worker: (none yet — bot is still learning)"
+    lines = ["Known tools/processes for this worker:"]
+    for k in knowledge:
+        kind = k.get("Kind", "")
+        name = k.get("Name", "")
+        url = k.get("URL", "")
+        desc = k.get("Description", "")
+        bits = [f"{kind}: {name}"]
+        if url:
+            bits.append(f"({url})")
+        if desc:
+            bits.append(f"— {desc}")
+        lines.append("- " + " ".join(bits))
+    return "\n".join(lines)
+
+
+def maybe_ask_followup(name: str, message: str, knowledge: list[dict],
+                       already_asked_today: list[str]) -> dict | None:
+    """Decide whether to ask a follow-up question about something the worker
+    mentioned. Returns {"ask": str, "topic": str} or None.
+
+    The bot should only ask when something genuinely new is mentioned that
+    would be useful to capture in the knowledge base. NOT for every check-in.
+    """
+    if not config.GOOGLE_API_KEY:
+        return None
+    if not message or not message.strip():
+        return None
+
+    knowledge_block = _knowledge_block(knowledge)
+    already_str = ", ".join(already_asked_today) if already_asked_today else "(nothing yet)"
+
+    prompt = f"""You are Sam — an AI assistant on a small team. After a worker sends
+a check-in message, you decide whether to ask ONE quick follow-up question
+to learn about an unfamiliar tool, sheet, doc, process, or workflow they
+just mentioned.
+
+ASK IF: the worker mentioned a tool/sheet/doc/process by name (or with an
+ambiguous reference like "the tracker", "the system", "that doc") that is
+NOT already in their known list. Knowing it would help future check-ins
+make sense.
+
+DO NOT ASK IF:
+- Already in the known list
+- Already asked about it today (see "already asked today" below)
+- Casual / personal (food, mood, family, weather)
+- Just normal task description with no specific tool/process name
+- You'd be asking for the sake of asking
+
+The follow-up must be short (<= 25 words), lowercase, friendly, written in
+Sam's voice. Example: "quick one — what's the tracker sheet? drop a link
+if there is one, I'll remember for next time".
+
+Worker: {name}
+Their check-in: "{message.strip()}"
+
+{knowledge_block}
+
+Already asked about today: {already_str}
+
+Respond as JSON ONLY:
+{{
+  "ask": "the follow-up message text, or null if nothing worth asking",
+  "topic": "1-3 word label of what the question is about (e.g. 'tracker sheet'), or null"
+}}
+"""
+    try:
+        data = _gemini_json(prompt, max_tokens=512)
+    except Exception as e:
+        log.warning("Follow-up generation failed for %s: %s", name, e)
+        return None
+
+    ask = data.get("ask")
+    topic = data.get("topic")
+    if not ask or ask in (None, "null") or not topic:
+        return None
+    ask_text = str(ask).strip()
+    topic_text = str(topic).strip().lower()
+    if not ask_text or ask_text.lower() in ("null", "none"):
+        return None
+    return {"ask": ask_text, "topic": topic_text}
+
+
+def extract_knowledge_from_reply(name: str, reply_text: str, asked_topic: str | None,
+                                  existing_knowledge: list[dict]) -> list[dict]:
+    """Given a worker's reply (often to a follow-up question), extract any
+    tools/sheets/docs/processes they referenced. Returns a list of dicts
+    matching KNOWLEDGE_HEADER columns (minus Worker/SlackID/timestamps).
+
+    Failsafe: returns [] on any error.
+    """
+    if not config.GOOGLE_API_KEY or not reply_text or not reply_text.strip():
+        return []
+
+    urls = URL_RE.findall(reply_text)
+    urls_block = ", ".join(urls) if urls else "(none)"
+    existing_names = [k.get("Name", "") for k in existing_knowledge if k.get("Name")]
+    existing_str = ", ".join(existing_names) if existing_names else "(none)"
+
+    prompt = f"""Extract any tools, sheets, docs, processes, workflows, or projects
+the worker referenced in their message. Output structured data.
+
+Worker: {name}
+Their message: "{reply_text.strip()}"
+URLs detected in the message: {urls_block}
+Question that was just asked of them (if any): {asked_topic or "(none — they spoke unprompted)"}
+Already-known item names for this worker: {existing_str}
+
+Respond as JSON ONLY:
+{{
+  "items": [
+    {{
+      "kind": "tool|sheet|doc|process|workflow|project",
+      "name": "concise human-readable name",
+      "url": "URL (use one from the detected URLs if relevant) or empty",
+      "description": "1-2 sentences in plain English",
+      "steps": "optional — bullet list for processes, otherwise empty"
+    }}
+  ]
+}}
+
+Rules:
+- Only output things genuinely referenced in their message. Don't invent.
+- Max 3 items per call.
+- For URLs that look like Google Sheets, set kind=sheet; Docs → doc;
+  Notion/Linear/Asana → tool.
+- If they didn't actually answer the question (e.g. just said "ok"),
+  return {{"items": []}}.
+- Output ONLY the JSON.
+"""
+    try:
+        data = _gemini_json(prompt, max_tokens=1024)
+    except Exception as e:
+        log.warning("Knowledge extraction failed for %s: %s", name, e)
+        return []
+
+    items = data.get("items")
+    if not isinstance(items, list):
+        return []
+    cleaned = []
+    for it in items[:3]:
+        if not isinstance(it, dict):
+            continue
+        name_val = str(it.get("name", "")).strip()
+        if not name_val:
+            continue
+        cleaned.append({
+            "Kind": str(it.get("kind", "tool")).strip().lower(),
+            "Name": name_val,
+            "URL": str(it.get("url", "")).strip(),
+            "Description": str(it.get("description", "")).strip(),
+            "Steps / Notes": str(it.get("steps", "")).strip(),
+        })
+    return cleaned
 
 
 def synthesize_weekly_profile(name: str, slack_user_id: str, first_seen: str,

@@ -174,6 +174,70 @@ def all_profiles() -> list[dict]:
     return ws.get_all_records()
 
 
+def list_worker_knowledge(slack_user_id: str) -> list[dict]:
+    """Return all Processes & Tools entries for one worker."""
+    try:
+        ws = open_tracker().worksheet(config.KNOWLEDGE_TAB)
+    except Exception:
+        return []
+    return [r for r in ws.get_all_records() if str(r.get("Slack User ID", "")).strip() == slack_user_id]
+
+
+def upsert_knowledge(entry: dict) -> str:
+    """Insert a new Processes & Tools row OR update an existing one matching
+    by (Slack User ID, Name). Returns 'inserted' or 'updated'."""
+    ws = open_tracker().worksheet(config.KNOWLEDGE_TAB)
+    rows = ws.get_all_values()
+    if not rows:
+        ws.update(values=[list(config.KNOWLEDGE_HEADER)], range_name="A1", value_input_option="USER_ENTERED")
+        rows = ws.get_all_values()
+    header = rows[0]
+
+    sid_col = header.index("Slack User ID") if "Slack User ID" in header else 1
+    name_col = header.index("Name") if "Name" in header else 3
+    times_col = header.index("Times Referenced") if "Times Referenced" in header else 9
+
+    target_row_idx = None
+    target_existing = None
+    target_uid = str(entry.get("Slack User ID", "")).strip()
+    target_name = str(entry.get("Name", "")).strip().lower()
+    for i, r in enumerate(rows[1:], start=2):
+        if len(r) <= max(sid_col, name_col):
+            continue
+        if r[sid_col].strip() == target_uid and r[name_col].strip().lower() == target_name:
+            target_row_idx = i
+            target_existing = r
+            break
+
+    if target_row_idx and target_existing:
+        # Update — merge: keep First Mentioned, bump Times Referenced, refresh URL/Description/Steps if new value present
+        merged = list(target_existing) + [""] * (len(header) - len(target_existing))
+        for col_name in ("Kind", "URL", "Description", "Steps / Notes"):
+            if entry.get(col_name) and col_name in header:
+                merged[header.index(col_name)] = str(entry[col_name])
+        if "Last Updated" in header:
+            merged[header.index("Last Updated")] = entry.get("Last Updated") or datetime.now(timezone.utc).date().isoformat()
+        try:
+            prev = int(merged[times_col] or 0)
+        except (TypeError, ValueError):
+            prev = 0
+        merged[times_col] = str(prev + 1)
+        ws.update(values=[merged], range_name=f"A{target_row_idx}", value_input_option="USER_ENTERED")
+        return "updated"
+
+    # Insert
+    today = datetime.now(timezone.utc).date().isoformat()
+    new_row = [str(entry.get(h, "")) for h in header]
+    if "First Mentioned" in header and not new_row[header.index("First Mentioned")]:
+        new_row[header.index("First Mentioned")] = today
+    if "Last Updated" in header and not new_row[header.index("Last Updated")]:
+        new_row[header.index("Last Updated")] = today
+    if not new_row[times_col]:
+        new_row[times_col] = "1"
+    ws.append_row(new_row, value_input_option="USER_ENTERED")
+    return "inserted"
+
+
 def activity_since(days_back: int, slack_user_id: str | None = None) -> list[dict]:
     """All activity from the last N calendar days, optionally filtered by user."""
     from datetime import datetime, timezone, timedelta

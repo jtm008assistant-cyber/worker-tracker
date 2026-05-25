@@ -100,6 +100,7 @@ def collect_worker_day(worker: dict, local_date: str) -> dict:
     local_help = [(t.astimezone(tz), m) for t, m in help_reqs]
 
     profile = sheets.load_profile(worker["user_id"])
+    knowledge = sheets.list_worker_knowledge(worker["user_id"])
     ai = analyzer.analyze(
         name=worker["name"],
         login_local=hhmm(login_ts),
@@ -109,6 +110,7 @@ def collect_worker_day(worker: dict, local_date: str) -> dict:
         missed=missed,
         checkins=local_checkins,
         profile=profile,
+        knowledge=knowledge,
     )
 
     return {

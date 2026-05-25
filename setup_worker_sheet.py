@@ -130,6 +130,11 @@ def main() -> None:
     profile.update(values=[wt.PROFILE_HEADER], range_name="A1", value_input_option="USER_ENTERED")
     _format_header(profile, wt.PROFILE_HEADER)
 
+    # Processes & Tools (knowledge base)
+    knowledge = ss.add_worksheet(title=wt.KNOWLEDGE_TAB, rows=500, cols=len(wt.KNOWLEDGE_HEADER))
+    knowledge.update(values=[wt.KNOWLEDGE_HEADER], range_name="A1", value_input_option="USER_ENTERED")
+    _format_header(knowledge, wt.KNOWLEDGE_HEADER)
+
     # ---------------- PAYROLL SHEET (separate) ----------------
     payroll_id, ps = _create_sheet(drive, gc, args.payroll_title, folder_id, args.email)
     payroll_ws = ps.sheet1

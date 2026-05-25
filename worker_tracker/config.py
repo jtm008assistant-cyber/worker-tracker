@@ -59,6 +59,7 @@ ROSTER_TAB = "Roster"
 ACTIVITY_TAB = "Activity Log"
 SUMMARY_TAB = "Daily Summary"
 PROFILE_TAB = "Worker Profile"
+KNOWLEDGE_TAB = "Processes & Tools"
 
 ROSTER_HEADER = [
     "Name", "Slack User ID", "Email", "Timezone", "Expected Start", "Expected EOD", "Active",
@@ -78,6 +79,17 @@ PROFILE_HEADER = [
     "Automation Opportunities (Open)", "Automation Opportunities (Shipped)",
     "Productivity Patterns", "Coaching Notes for Manager", "Last Updated",
 ]
+
+KNOWLEDGE_HEADER = [
+    "Worker", "Slack User ID", "Kind", "Name", "URL",
+    "Description", "Steps / Notes",
+    "First Mentioned", "Last Updated", "Times Referenced",
+]
+
+# How aggressively Sam asks follow-up questions when workers mention unfamiliar things
+MAX_FOLLOWUPS_PER_DAY = int(os.environ.get("MAX_FOLLOWUPS_PER_DAY", "2"))
+# Minimum minutes between follow-ups to the same worker
+FOLLOWUP_COOLDOWN_MINUTES = int(os.environ.get("FOLLOWUP_COOLDOWN_MINUTES", "60"))
 
 WEEKLY_SYNTHESIS_DOW = int(os.environ.get("WEEKLY_SYNTHESIS_DOW", "6"))  # 0=Mon, 6=Sun
 WEEKLY_SYNTHESIS_TIME = os.environ.get("WEEKLY_SYNTHESIS_TIME", "21:00")

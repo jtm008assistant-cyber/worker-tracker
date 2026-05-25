@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import config, sheets, report
+from . import config, sheets, report, analyzer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
@@ -36,6 +36,13 @@ WORKERS: dict[str, dict] = {}          # user_id -> roster dict
 LOGGED_IN_TODAY: dict[str, str] = {}   # user_id -> local_date_iso
 PROMPT_PENDING: dict[str, datetime] = {}
 ON_BREAK: dict[str, datetime] = {}     # user_id -> break_start_utc
+
+# Active follow-up state. PENDING_FOLLOWUP[uid] -> {topic, asked_at}: the bot
+# asked a follow-up, expects the worker's next message to be the answer.
+PENDING_FOLLOWUP: dict[str, dict] = {}
+# FOLLOWUPS_TODAY[uid] -> {date, count, topics}: how many we've asked today.
+FOLLOWUPS_TODAY: dict[str, dict] = {}
+LAST_FOLLOWUP_AT: dict[str, datetime] = {}
 
 
 def reload_roster() -> None:
@@ -239,10 +246,83 @@ def handle_message(event, client) -> None:
         try:
             client.chat_postMessage(
                 channel=user_id,
-                text="Flagged — manager will see this in the EOD report. Say more if you want it pinged sooner.",
+                text="noted — flagging this for the manager. drop more detail if you need it sooner.",
             )
         except Exception:
             pass
+
+    # --- Knowledge / follow-up handling ---
+    try:
+        _handle_knowledge_and_followup(user_id, worker, text, today, client)
+    except Exception:
+        log.exception("knowledge/follow-up step failed for %s", user_id)
+
+
+def _reset_followups_if_new_day(user_id: str, local_date: str) -> None:
+    state = FOLLOWUPS_TODAY.get(user_id)
+    if not state or state.get("date") != local_date:
+        FOLLOWUPS_TODAY[user_id] = {"date": local_date, "count": 0, "topics": []}
+
+
+def _handle_knowledge_and_followup(user_id: str, worker: dict, text: str,
+                                   today: str, client) -> None:
+    """Two-step:
+    1) If we asked a follow-up earlier and they're now replying, extract any
+       tools/sheets/processes from the reply and save to the Knowledge tab.
+    2) After that (or if no pending), maybe ask a NEW follow-up about
+       something they mentioned. Rate-limited.
+    """
+    _reset_followups_if_new_day(user_id, today)
+    existing = sheets.list_worker_knowledge(user_id)
+
+    pending = PENDING_FOLLOWUP.pop(user_id, None)
+    if pending:
+        items = analyzer.extract_knowledge_from_reply(
+            name=worker["name"],
+            reply_text=text,
+            asked_topic=pending.get("topic"),
+            existing_knowledge=existing,
+        )
+        if items:
+            for it in items:
+                it["Worker"] = worker["name"]
+                it["Slack User ID"] = user_id
+                sheets.upsert_knowledge(it)
+            try:
+                client.chat_postMessage(
+                    channel=user_id,
+                    text=f"saved 🙌 (logged {len(items)} new {'item' if len(items)==1 else 'items'} to your tools list — thanks)",
+                )
+            except Exception:
+                pass
+            # Refresh existing so we don't double-ask about something we just learned
+            existing = sheets.list_worker_knowledge(user_id)
+
+    state = FOLLOWUPS_TODAY[user_id]
+    if state["count"] >= config.MAX_FOLLOWUPS_PER_DAY:
+        return
+    last = LAST_FOLLOWUP_AT.get(user_id)
+    if last and (datetime.now(timezone.utc) - last).total_seconds() < config.FOLLOWUP_COOLDOWN_MINUTES * 60:
+        return
+
+    decision = analyzer.maybe_ask_followup(
+        name=worker["name"],
+        message=text,
+        knowledge=existing,
+        already_asked_today=state["topics"],
+    )
+    if not decision:
+        return
+
+    try:
+        client.chat_postMessage(channel=user_id, text=decision["ask"])
+    except Exception:
+        log.exception("Failed to send follow-up question to %s", user_id)
+        return
+    PENDING_FOLLOWUP[user_id] = {"topic": decision["topic"], "asked_at": datetime.now(timezone.utc)}
+    state["count"] += 1
+    state["topics"].append(decision["topic"])
+    LAST_FOLLOWUP_AT[user_id] = datetime.now(timezone.utc)
 
 
 def restore_state() -> None:
