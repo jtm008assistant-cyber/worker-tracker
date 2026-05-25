@@ -171,14 +171,27 @@ HOURS_QUERY_PATTERNS = (
 
 # Worker flags that their tracked hours are wrong
 # Admin commands — recognized when DMed by a user listed in ADMIN_SLACK_IDS.
-# Defaults to Jan (UCXSXMU21). Override via env var, comma-separated.
-ADMIN_SLACK_IDS = [s.strip() for s in os.environ.get("ADMIN_SLACK_IDS", "UCXSXMU21").split(",") if s.strip()]
+# Defaults: Jan (UCXSXMU21) + Ideen (UCYBJC86S). Override via env var, comma-separated.
+ADMIN_SLACK_IDS = [
+    s.strip() for s in os.environ.get("ADMIN_SLACK_IDS", "UCXSXMU21,UCYBJC86S").split(",") if s.strip()
+]
 
 ADMIN_INTRODUCE_PATTERNS = (
     r"\bintroduce (?:everyone|all|workers?|the team)\b",
     r"\bsend intros?\b",
     r"\bonboard (?:everyone|all|workers?|the team)\b",
     r"\bintro all\b",
+)
+
+# Admins can ask "what is X doing" / "where's X" / "status of X" / etc.
+# The (.+?) captures the worker name (can be partial: "Hannah" matches "Hannah May Bagares").
+ADMIN_STATUS_PATTERNS = (
+    r"\bwhat(?:'s| is| are)\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:doing|up to|working on)\b",
+    r"\bhow(?:'s| is)\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:doing|going)\b",
+    r"\bwhere(?:'s| is)\s+([A-Za-z][\w\s'.-]{0,30}?)\b",
+    r"\bstatus (?:of|on|for)\s+([A-Za-z][\w\s'.-]{0,30}?)\b",
+    r"\bcheck on\s+([A-Za-z][\w\s'.-]{0,30}?)\b",
+    r"\bis\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:online|working|on|here)\b",
 )
 
 DISCREPANCY_PATTERNS = (

@@ -31,6 +31,7 @@ _break_end_re = re.compile("|".join(config.BREAK_END_PATTERNS), re.IGNORECASE)
 _hours_query_re = re.compile("|".join(config.HOURS_QUERY_PATTERNS), re.IGNORECASE)
 _discrepancy_re = re.compile("|".join(config.DISCREPANCY_PATTERNS), re.IGNORECASE)
 _admin_intro_re = re.compile("|".join(config.ADMIN_INTRODUCE_PATTERNS), re.IGNORECASE)
+_admin_status_re = re.compile("|".join(config.ADMIN_STATUS_PATTERNS), re.IGNORECASE)
 
 scheduler = BackgroundScheduler()
 _app = None  # set in main()
@@ -106,6 +107,121 @@ def _format_hours_summary(worker: dict) -> str:
     )
 
 
+def _find_worker_by_name(query: str) -> list[dict]:
+    """Fuzzy match a name query against the roster. Tries (1) full name exact
+    match, (2) first-name exact match, (3) substring on full name. Returns
+    list of matching worker dicts."""
+    q = query.strip().lower()
+    if not q:
+        return []
+    workers = list(WORKERS.values())
+    # 1) exact full-name match
+    exact = [w for w in workers if w["name"].lower() == q]
+    if exact:
+        return exact
+    # 2) first-name exact match
+    firstname = [w for w in workers if w["name"].split()[0].lower() == q]
+    if firstname:
+        return firstname
+    # 3) substring anywhere in full name
+    substr = [w for w in workers if q in w["name"].lower()]
+    return substr
+
+
+def _format_worker_status(worker: dict) -> str:
+    """Snapshot of where a worker currently is right now. Reads today's
+    Activity Log and pay-period summary."""
+    from . import payroll as _payroll
+    try:
+        tz = ZoneInfo(worker["tz"])
+    except Exception:
+        tz = ZoneInfo("UTC")
+    now_local = datetime.now(tz)
+    today = now_local.date().isoformat()
+    rows = [r for r in sheets.activity_rows(today) if r.get("Slack User ID") == worker["user_id"]]
+    rows.sort(key=lambda r: r.get("Timestamp UTC", ""))
+
+    login_ts = eod_ts = last_checkin_ts = None
+    last_checkin_msg = ""
+    break_start_ts = None
+    state = "not_started"
+    for r in rows:
+        try:
+            ts = datetime.fromisoformat(r["Timestamp UTC"]).astimezone(timezone.utc)
+        except Exception:
+            continue
+        t = r.get("Type", "")
+        msg = r.get("Message", "")
+        if t == "login":
+            login_ts = login_ts or ts
+            state = "working"
+        elif t == "eod":
+            eod_ts = ts
+            state = "logged_off"
+            break_start_ts = None
+        elif t == "checkin" or t == "help_request":
+            last_checkin_ts = ts
+            last_checkin_msg = msg
+        elif t == "break_start":
+            break_start_ts = ts
+            state = "on_break"
+        elif t == "break_end":
+            break_start_ts = None
+            state = "working"
+
+    first = worker["name"].split()[0] if worker["name"] else worker["name"]
+
+    if state == "not_started":
+        # Look for last activity in last 7 days
+        recent = sheets.activity_since(7, slack_user_id=worker["user_id"])
+        last_seen = ""
+        if recent:
+            recent.sort(key=lambda r: r.get("Timestamp UTC", ""))
+            last_seen = recent[-1].get("Local Date", "")
+        return (
+            f"⚪ *{worker['name']}* — hasn't clocked in today\n"
+            + (f"last seen: {last_seen}" if last_seen else "no recent activity recorded")
+        )
+
+    # Get pay-period totals for context
+    try:
+        start, end = _payroll.current_open_period()
+        totals = _payroll.worker_period_totals(worker, start, end)
+        period_line = f"pay period ({start} → {end}): {totals['total_hours']}h logged"
+    except Exception:
+        period_line = ""
+
+    login_str = login_ts.astimezone(tz).strftime("%H:%M") if login_ts else "—"
+    if state == "logged_off":
+        eod_str = eod_ts.astimezone(tz).strftime("%H:%M") if eod_ts else "—"
+        return (
+            f"⚫ *{worker['name']}* — logged off for the day\n"
+            f"login {login_str} → EOD {eod_str} ({worker['tz']})\n"
+            f"{period_line}"
+        )
+
+    # Working or on break
+    if state == "on_break" and break_start_ts:
+        break_min = int((datetime.now(timezone.utc) - break_start_ts).total_seconds() / 60)
+        header = f"🟡 *{worker['name']}* — on break ({break_min} min so far)"
+    else:
+        header = f"🟢 *{worker['name']}* — currently working"
+
+    last_ck_line = ""
+    if last_checkin_ts and last_checkin_msg:
+        mins_ago = int((datetime.now(timezone.utc) - last_checkin_ts).total_seconds() / 60)
+        last_ck_line = f"\nlast check-in ({mins_ago} min ago): \"{last_checkin_msg.strip()}\""
+    elif last_checkin_ts is None:
+        last_ck_line = "\nno check-in messages yet today (just logged in)"
+
+    return (
+        f"{header}\n"
+        f"clocked in at {login_str} {worker['tz']}"
+        f"{last_ck_line}\n"
+        f"{period_line}"
+    )
+
+
 def _interval_for(user_id: str) -> int:
     w = WORKERS.get(user_id)
     if w and w.get("checkin_interval_min"):
@@ -178,7 +294,30 @@ def handle_message(event, client) -> None:
         return
     log.info("  -> handling as worker DM from %s", user_id)
 
-    # Admin commands — only Jan (or others in ADMIN_SLACK_IDS) can trigger these.
+    # Admin commands — only Jan / Ideen (or others in ADMIN_SLACK_IDS) can trigger these.
+    if user_id in config.ADMIN_SLACK_IDS:
+        # "what is X doing" / "status of X" / etc.
+        m = _admin_status_re.search(text)
+        if m:
+            # Find the first non-None captured group (different patterns capture in different positions)
+            query = next((g for g in m.groups() if g), "").strip()
+            # Trim trailing words like "doing" if regex caught too much
+            query = re.sub(r"\s+(?:doing|up|working|going|online|on|here)$", "", query, flags=re.IGNORECASE).strip()
+            matches = _find_worker_by_name(query)
+            if not matches:
+                client.chat_postMessage(channel=user_id, text=f"don't know anyone named '{query}' on the roster — try just their first name?")
+                return
+            if len(matches) > 1:
+                names = ", ".join(w["name"] for w in matches)
+                client.chat_postMessage(channel=user_id, text=f"multiple matches for '{query}': {names}. ask again with a more specific name?")
+                return
+            try:
+                snapshot = _format_worker_status(matches[0])
+                client.chat_postMessage(channel=user_id, text=snapshot)
+            except Exception as e:
+                log.exception("status snapshot failed for %s", matches[0]["name"])
+                client.chat_postMessage(channel=user_id, text=f"hit an error checking on {matches[0]['name']}: {e}")
+            return
     if user_id in config.ADMIN_SLACK_IDS and _admin_intro_re.search(text):
         try:
             client.chat_postMessage(channel=user_id, text="on it — DMing everyone who hasn't been introduced yet… 🚀")
