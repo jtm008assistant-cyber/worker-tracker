@@ -294,14 +294,16 @@ def handle_message(event, client) -> None:
         return
     log.info("  -> handling as worker DM from %s", user_id)
 
-    # Admin commands — only Jan / Ideen (or others in ADMIN_SLACK_IDS) can trigger these.
-    if user_id in config.ADMIN_SLACK_IDS:
+    # Admin commands — owners (Jan/Ideen) full power, managers (Hannah) can query non-owners.
+    is_owner = user_id in config.OWNER_SLACK_IDS
+    is_manager = user_id in config.MANAGER_SLACK_IDS
+    is_admin = is_owner or is_manager
+
+    if is_admin:
         # "what is X doing" / "status of X" / etc.
         m = _admin_status_re.search(text)
         if m:
-            # Find the first non-None captured group (different patterns capture in different positions)
             query = next((g for g in m.groups() if g), "").strip()
-            # Trim trailing words like "doing" if regex caught too much
             query = re.sub(r"\s+(?:doing|up|working|going|online|on|here)$", "", query, flags=re.IGNORECASE).strip()
             matches = _find_worker_by_name(query)
             if not matches:
@@ -311,14 +313,20 @@ def handle_message(event, client) -> None:
                 names = ", ".join(w["name"] for w in matches)
                 client.chat_postMessage(channel=user_id, text=f"multiple matches for '{query}': {names}. ask again with a more specific name?")
                 return
+            target = matches[0]
+            # Managers can't query owners
+            if is_manager and not is_owner and target["user_id"] in config.OWNER_SLACK_IDS:
+                client.chat_postMessage(channel=user_id, text=f"sorry, can't share that with you 🙅 status on {target['name'].split()[0]} is owner-level only.")
+                return
             try:
-                snapshot = _format_worker_status(matches[0])
+                snapshot = _format_worker_status(target)
                 client.chat_postMessage(channel=user_id, text=snapshot)
             except Exception as e:
-                log.exception("status snapshot failed for %s", matches[0]["name"])
-                client.chat_postMessage(channel=user_id, text=f"hit an error checking on {matches[0]['name']}: {e}")
+                log.exception("status snapshot failed for %s", target["name"])
+                client.chat_postMessage(channel=user_id, text=f"hit an error checking on {target['name']}: {e}")
             return
-    if user_id in config.ADMIN_SLACK_IDS and _admin_intro_re.search(text):
+    # 'introduce everyone' — owners only (managers can't broadcast intros)
+    if is_owner and _admin_intro_re.search(text):
         try:
             client.chat_postMessage(channel=user_id, text="on it — DMing everyone who hasn't been introduced yet… 🚀")
         except Exception:

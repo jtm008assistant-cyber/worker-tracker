@@ -170,11 +170,18 @@ HOURS_QUERY_PATTERNS = (
 )
 
 # Worker flags that their tracked hours are wrong
-# Admin commands — recognized when DMed by a user listed in ADMIN_SLACK_IDS.
-# Defaults: Jan (UCXSXMU21) + Ideen (UCYBJC86S). Override via env var, comma-separated.
-ADMIN_SLACK_IDS = [
-    s.strip() for s in os.environ.get("ADMIN_SLACK_IDS", "UCXSXMU21,UCYBJC86S").split(",") if s.strip()
+# Two-tier admin model:
+#   OWNER_SLACK_IDS  — full power. Can broadcast intros, query anyone. Cannot be queried by managers.
+#   MANAGER_SLACK_IDS — can query worker status, but cannot query owners. Treated as workers for daily tracking.
+# Both default + env-var overridable, comma-separated.
+OWNER_SLACK_IDS = [
+    s.strip() for s in os.environ.get("OWNER_SLACK_IDS", "UCXSXMU21,UCYBJC86S").split(",") if s.strip()
 ]
+MANAGER_SLACK_IDS = [
+    s.strip() for s in os.environ.get("MANAGER_SLACK_IDS", "U030Q7R9FNC").split(",") if s.strip()
+]
+# Union used to gate admin-command routing in the bot.
+ADMIN_SLACK_IDS = list({*OWNER_SLACK_IDS, *MANAGER_SLACK_IDS})
 
 ADMIN_INTRODUCE_PATTERNS = (
     r"\bintroduce (?:everyone|all|workers?|the team)\b",
