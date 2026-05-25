@@ -109,6 +109,10 @@ def load_roster() -> List[dict]:
             "ot_multiplier": _f("Overtime Multiplier", config.PAYROLL_DEFAULT_OT_MULTIPLIER),
             "checkin_interval_min": checkin_interval,
             "personal_view_url": str(r.get("Personal View Sheet URL") or "").strip(),
+            # Comma-separated nicknames the bot will match against (e.g. "norks, norlan")
+            "nicknames": [
+                n.strip().lower() for n in str(r.get("Nicknames", "")).split(",") if n.strip()
+            ],
         })
     return workers
 

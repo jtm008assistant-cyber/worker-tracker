@@ -73,7 +73,7 @@ ROSTER_HEADER = [
     "Timezone", "Expected Start", "Expected EOD", "Active",
     "Pay Type", "Hourly Rate", "Salary (per period)", "Currency",
     "Overtime Threshold (h/wk)", "Overtime Multiplier",
-    "Check-in Frequency (min)", "Personal View Sheet URL",
+    "Check-in Frequency (min)", "Personal View Sheet URL", "Nicknames",
 ]
 ACTIVITY_HEADER = ["Timestamp UTC", "Local Date", "Local Time", "Worker", "Slack User ID", "Type", "Message"]
 SUMMARY_HEADER = [
@@ -205,12 +205,19 @@ ADMIN_INTRODUCE_PATTERNS = (
 # Admins can ask "what is X doing" / "where's X" / "status of X" / etc.
 # The (.+?) captures the worker name (can be partial: "Hannah" matches "Hannah May Bagares").
 ADMIN_STATUS_PATTERNS = (
-    r"\bwhat(?:'s| is| are)\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:doing|up to|working on)\b",
-    r"\bhow(?:'s| is)\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:doing|going)\b",
-    r"\bwhere(?:'s| is)\s+([A-Za-z][\w\s'.-]{0,30}?)\b",
+    # "what's X doing" / "whats X doin" / "what is X up to" / "what are workers doing"
+    r"\bwhat(?:'?s| is| are)?\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:doing|doin'?|up to|working on|workin'? on)\b",
+    # "how's X doing" / "hows X going" / "how is Hannah doin"
+    r"\bhow(?:'?s| is)?\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:doing|doin'?|going|goin'?)\b",
+    # "where's X" / "wheres X" / "where is X"
+    r"\bwhere(?:'?s| is)?\s+([A-Za-z][\w\s'.-]{0,30}?)\b",
+    # "status of X" / "status on X" / "X status"
     r"\bstatus (?:of|on|for)\s+([A-Za-z][\w\s'.-]{0,30}?)\b",
-    r"\bcheck on\s+([A-Za-z][\w\s'.-]{0,30}?)\b",
-    r"\bis\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:online|working|on|here)\b",
+    r"\b([A-Za-z][\w\s'.-]{0,30}?)\s+status\b",
+    # "check on X" / "check X"
+    r"\bcheck (?:on\s+)?([A-Za-z][\w\s'.-]{0,30}?)\b",
+    # "is X online/working/here"
+    r"\bis\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:online|working|workin'?|on|here|around)\b",
 )
 
 DISCREPANCY_PATTERNS = (

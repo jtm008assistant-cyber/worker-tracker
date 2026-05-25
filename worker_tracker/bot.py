@@ -108,9 +108,9 @@ def _format_hours_summary(worker: dict) -> str:
 
 
 def _find_worker_by_name(query: str) -> list[dict]:
-    """Fuzzy match a name query against the roster. Tries (1) full name exact
-    match, (2) first-name exact match, (3) substring on full name. Returns
-    list of matching worker dicts."""
+    """Fuzzy match a name query against the roster. Tries (1) full name exact,
+    (2) first-name exact, (3) nickname exact, (4) substring. Returns list of
+    matching worker dicts."""
     q = query.strip().lower()
     if not q:
         return []
@@ -123,7 +123,11 @@ def _find_worker_by_name(query: str) -> list[dict]:
     firstname = [w for w in workers if w["name"].split()[0].lower() == q]
     if firstname:
         return firstname
-    # 3) substring anywhere in full name
+    # 3) nickname exact match (from Roster Nicknames col)
+    nick_match = [w for w in workers if q in (w.get("nicknames") or [])]
+    if nick_match:
+        return nick_match
+    # 4) substring anywhere in full name
     substr = [w for w in workers if q in w["name"].lower()]
     return substr
 
