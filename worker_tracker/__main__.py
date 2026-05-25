@@ -34,8 +34,11 @@ def main() -> None:
             print(f"Created {len(out)} personal view sheets:")
             for name, url in out.items():
                 print(f"  {name}: {url}")
+    elif cmd == "introduce":
+        from . import onboarding
+        onboarding.main(sys.argv[2:])
     else:
-        sys.exit(f"Unknown command: {cmd}. Try: bot | weekly | digest | payroll | create_views")
+        sys.exit(f"Unknown command: {cmd}. Try: bot | weekly | digest | payroll | create_views | introduce")
 
 
 if __name__ == "__main__":

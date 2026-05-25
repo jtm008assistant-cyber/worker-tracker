@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import config, sheets, report, analyzer, payroll, worker_views
+from . import config, sheets, report, analyzer, payroll, worker_views, onboarding
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
@@ -30,6 +30,7 @@ _break_start_re = re.compile("|".join(config.BREAK_START_PATTERNS), re.IGNORECAS
 _break_end_re = re.compile("|".join(config.BREAK_END_PATTERNS), re.IGNORECASE)
 _hours_query_re = re.compile("|".join(config.HOURS_QUERY_PATTERNS), re.IGNORECASE)
 _discrepancy_re = re.compile("|".join(config.DISCREPANCY_PATTERNS), re.IGNORECASE)
+_admin_intro_re = re.compile("|".join(config.ADMIN_INTRODUCE_PATTERNS), re.IGNORECASE)
 
 scheduler = BackgroundScheduler()
 _app = None  # set in main()
@@ -176,6 +177,35 @@ def handle_message(event, client) -> None:
         log.info("  -> ignored (no user_id)")
         return
     log.info("  -> handling as worker DM from %s", user_id)
+
+    # Admin commands — only Jan (or others in ADMIN_SLACK_IDS) can trigger these.
+    if user_id in config.ADMIN_SLACK_IDS and _admin_intro_re.search(text):
+        try:
+            client.chat_postMessage(channel=user_id, text="on it — DMing everyone who hasn't been introduced yet… 🚀")
+        except Exception:
+            pass
+        try:
+            results = onboarding.send_introductions()
+            sent = [n for n, s in results.items() if s == "sent"]
+            skipped = [n for n, s in results.items() if "skipped" in s]
+            failed = [(n, s) for n, s in results.items() if "failed" in s]
+            summary_lines = [f"done! intros sent to {len(sent)} worker(s):"]
+            for n in sent:
+                summary_lines.append(f"  ✓ {n}")
+            if skipped:
+                summary_lines.append(f"\nskipped (already introduced): {', '.join(skipped)}")
+            if failed:
+                summary_lines.append("\nfailed:")
+                for n, s in failed:
+                    summary_lines.append(f"  ✗ {n} — {s}")
+            client.chat_postMessage(channel=user_id, text="\n".join(summary_lines))
+        except Exception as e:
+            log.exception("admin introduce command failed")
+            try:
+                client.chat_postMessage(channel=user_id, text=f"hit an error running intros: {e}")
+            except Exception:
+                pass
+        return
 
     if user_id not in WORKERS:
         reload_roster()

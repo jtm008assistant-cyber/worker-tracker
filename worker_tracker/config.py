@@ -170,6 +170,17 @@ HOURS_QUERY_PATTERNS = (
 )
 
 # Worker flags that their tracked hours are wrong
+# Admin commands — recognized when DMed by a user listed in ADMIN_SLACK_IDS.
+# Defaults to Jan (UCXSXMU21). Override via env var, comma-separated.
+ADMIN_SLACK_IDS = [s.strip() for s in os.environ.get("ADMIN_SLACK_IDS", "UCXSXMU21").split(",") if s.strip()]
+
+ADMIN_INTRODUCE_PATTERNS = (
+    r"\bintroduce (?:everyone|all|workers?|the team)\b",
+    r"\bsend intros?\b",
+    r"\bonboard (?:everyone|all|workers?|the team)\b",
+    r"\bintro all\b",
+)
+
 DISCREPANCY_PATTERNS = (
     r"\bwrong\b", r"\bincorrect\b", r"\bdiscrepancy\b",
     r"\bmissed (?:a |my |the )?(?:break|lunch|hour|time)\b",
