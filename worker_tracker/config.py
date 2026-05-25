@@ -68,7 +68,7 @@ ROSTER_HEADER = [
     "Name", "Slack User ID", "Email", "Timezone", "Expected Start", "Expected EOD", "Active",
     "Pay Type", "Hourly Rate", "Salary (per period)", "Currency",
     "Overtime Threshold (h/wk)", "Overtime Multiplier",
-    "Check-in Frequency (min)",
+    "Check-in Frequency (min)", "Personal View Sheet URL",
 ]
 ACTIVITY_HEADER = ["Timestamp UTC", "Local Date", "Local Time", "Worker", "Slack User ID", "Type", "Message"]
 SUMMARY_HEADER = [

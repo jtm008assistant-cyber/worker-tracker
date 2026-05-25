@@ -102,6 +102,7 @@ def load_roster() -> List[dict]:
             "ot_threshold": _f("Overtime Threshold (h/wk)", config.PAYROLL_DEFAULT_OT_THRESHOLD),
             "ot_multiplier": _f("Overtime Multiplier", config.PAYROLL_DEFAULT_OT_MULTIPLIER),
             "checkin_interval_min": checkin_interval,
+            "personal_view_url": str(r.get("Personal View Sheet URL") or "").strip(),
         })
     return workers
 

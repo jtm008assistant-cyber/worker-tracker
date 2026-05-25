@@ -25,8 +25,17 @@ def main() -> None:
     elif cmd == "payroll":
         from . import report
         report.run_and_send_payroll()
+    elif cmd == "create_views":
+        from . import worker_views
+        out = worker_views.create_views_for_all()
+        if not out:
+            print("Every active worker already has a personal view sheet.")
+        else:
+            print(f"Created {len(out)} personal view sheets:")
+            for name, url in out.items():
+                print(f"  {name}: {url}")
     else:
-        sys.exit(f"Unknown command: {cmd}. Try: bot | weekly | digest | payroll")
+        sys.exit(f"Unknown command: {cmd}. Try: bot | weekly | digest | payroll | create_views")
 
 
 if __name__ == "__main__":

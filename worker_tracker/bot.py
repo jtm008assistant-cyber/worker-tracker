@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import config, sheets, report, analyzer, payroll
+from . import config, sheets, report, analyzer, payroll, worker_views
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
@@ -293,11 +293,32 @@ def handle_message(event, client) -> None:
         hours = interval // 60
         mins = interval % 60
         cadence = f"{hours}h" if mins == 0 else f"{hours}h{mins}m"
+
+        # Auto-create personal view sheet on first login if they don't have one
+        view_url = worker.get("personal_view_url")
+        view_intro = ""
+        if not view_url:
+            try:
+                view_url = worker_views.ensure_view_for_worker(worker)
+                if view_url:
+                    # Update in-memory roster so subsequent messages skip this
+                    worker["personal_view_url"] = view_url
+                    WORKERS[user_id] = worker
+                    view_intro = (
+                        f"\n\nalso made you a personal sheet where you can see your own hours "
+                        f"and pay history anytime: {view_url}\n"
+                        f"first time you open it, you'll see a yellow banner — click 'Allow access' "
+                        f"and your data shows up. only you can see this sheet."
+                    )
+            except Exception:
+                log.exception("Failed to provision view sheet for %s", worker["name"])
+
         client.chat_postMessage(
             channel=user_id,
             text=(
                 f"hey {first}! got you in 🙌 I'll loop back every {cadence} to see "
                 f"how things are going. shoot me 'EOD' whenever you wrap up."
+                + view_intro
             ),
         )
         return

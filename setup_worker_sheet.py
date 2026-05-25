@@ -116,6 +116,7 @@ def main() -> None:
         "USD",
         "40", "1.5",
         "",         # Check-in Frequency: blank = use global default (120 min)
+        "",         # Personal View Sheet URL — auto-populated by bot on first login (or python -m worker_tracker create_views)
     ]
     roster.update(values=[wt.ROSTER_HEADER, sample], range_name="A1", value_input_option="USER_ENTERED")
     _format_header(roster, wt.ROSTER_HEADER)
