@@ -76,13 +76,20 @@ def is_break_end(text: str) -> bool:
     return bool(_break_end_re.search(text or ""))
 
 
+def _interval_for(user_id: str) -> int:
+    w = WORKERS.get(user_id)
+    if w and w.get("checkin_interval_min"):
+        return int(w["checkin_interval_min"])
+    return config.CHECKIN_INTERVAL_MINUTES
+
+
 def schedule_next_prompt(user_id: str) -> None:
     job_id = f"prompt:{user_id}"
     try:
         scheduler.remove_job(job_id)
     except Exception:
         pass
-    when = datetime.now(timezone.utc) + timedelta(minutes=config.CHECKIN_INTERVAL_MINUTES)
+    when = datetime.now(timezone.utc) + timedelta(minutes=_interval_for(user_id))
     scheduler.add_job(send_prompt, "date", run_date=when, args=[user_id], id=job_id)
 
 
@@ -227,8 +234,9 @@ def handle_message(event, client) -> None:
         LOGGED_IN_TODAY[user_id] = today
         sheets.append_event(worker["name"], user_id, "login", text, worker["tz"])
         schedule_next_prompt(user_id)
-        hours = config.CHECKIN_INTERVAL_MINUTES // 60
-        mins = config.CHECKIN_INTERVAL_MINUTES % 60
+        interval = _interval_for(user_id)
+        hours = interval // 60
+        mins = interval % 60
         cadence = f"{hours}h" if mins == 0 else f"{hours}h{mins}m"
         client.chat_postMessage(
             channel=user_id,

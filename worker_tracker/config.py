@@ -44,7 +44,7 @@ REPORT_RECIPIENT = os.environ.get("REPORT_RECIPIENT") or GMAIL_USER
 MANAGER_TZ = os.environ.get("MANAGER_TZ", "America/New_York")
 REPORT_TIME_LOCAL = os.environ.get("REPORT_TIME_LOCAL", "22:00")
 
-CHECKIN_INTERVAL_MINUTES = int(os.environ.get("CHECKIN_INTERVAL_MINUTES", "90"))
+CHECKIN_INTERVAL_MINUTES = int(os.environ.get("CHECKIN_INTERVAL_MINUTES", "120"))  # 2h default
 MISSED_CHECKIN_GRACE_MINUTES = int(os.environ.get("MISSED_CHECKIN_GRACE_MINUTES", "30"))
 
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
@@ -64,6 +64,7 @@ KNOWLEDGE_TAB = "Processes & Tools"
 ROSTER_HEADER = [
     "Name", "Slack User ID", "Email", "Timezone", "Expected Start", "Expected EOD", "Active",
     "Pay Type", "Hourly Rate", "Currency", "Overtime Threshold (h/wk)", "Overtime Multiplier",
+    "Check-in Frequency (min)",
 ]
 ACTIVITY_HEADER = ["Timestamp UTC", "Local Date", "Local Time", "Worker", "Slack User ID", "Type", "Message"]
 SUMMARY_HEADER = [

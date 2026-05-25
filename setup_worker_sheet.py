@@ -111,6 +111,7 @@ def main() -> None:
         "Alice Example", "U01ABCDEF", "alice@example.com",
         "America/New_York", "09:00", "17:00", "TRUE",
         "hourly", "25", "USD", "40", "1.5",
+        "",  # Check-in Frequency: blank = use global default (120 min). Override per-worker, e.g. 90 for tighter, 180 for looser.
     ]
     roster.update(values=[wt.ROSTER_HEADER, sample], range_name="A1", value_input_option="USER_ENTERED")
     _format_header(roster, wt.ROSTER_HEADER)

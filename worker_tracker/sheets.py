@@ -79,6 +79,15 @@ def load_roster() -> List[dict]:
             except (TypeError, ValueError):
                 return default
 
+        # Per-worker check-in cadence: blank/0 means "use global default"
+        try:
+            interval_raw = str(r.get("Check-in Frequency (min)", "")).strip()
+            checkin_interval = int(float(interval_raw)) if interval_raw else 0
+        except (TypeError, ValueError):
+            checkin_interval = 0
+        if checkin_interval <= 0:
+            checkin_interval = config.CHECKIN_INTERVAL_MINUTES
+
         workers.append({
             "name": str(r.get("Name", "")).strip() or uid,
             "user_id": uid,
@@ -91,6 +100,7 @@ def load_roster() -> List[dict]:
             "currency": str(r.get("Currency") or config.PAYROLL_DEFAULT_CURRENCY).strip(),
             "ot_threshold": _f("Overtime Threshold (h/wk)", config.PAYROLL_DEFAULT_OT_THRESHOLD),
             "ot_multiplier": _f("Overtime Multiplier", config.PAYROLL_DEFAULT_OT_MULTIPLIER),
+            "checkin_interval_min": checkin_interval,
         })
     return workers
 
