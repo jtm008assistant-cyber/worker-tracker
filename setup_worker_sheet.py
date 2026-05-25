@@ -166,7 +166,7 @@ def main() -> None:
     print(f"      PAYROLL_SHEET_ID={payroll_id}")
     print()
     print("  Next steps:")
-    print("    1. Open the Tracker sheet → Roster tab → replace the Alice Example")
+    print("    1. Open the Tracker sheet -> Roster tab -> replace the Alice Example")
     print("       row with your real workers (one per row). Fill Hourly Rate and")
     print("       leave Active=TRUE. Set Pay Type to 'hourly' or 'salaried'.")
     print("    2. Follow worker_tracker/SETUP.md to create the Slack app and")
