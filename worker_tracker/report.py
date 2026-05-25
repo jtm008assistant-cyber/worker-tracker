@@ -172,6 +172,14 @@ def send_payroll_digest(results: list[dict]) -> None:
     total = sum(r["calc"]["gross_pay"] for r in results)
     currency = results[0]["worker"].get("currency", config.PAYROLL_DEFAULT_CURRENCY)
 
+    # Pull any discrepancy reports workers flagged during this period
+    all_activity = sheets.activity_rows(None)
+    discrepancies = [
+        r for r in all_activity
+        if r.get("Type") == "hours_discrepancy"
+        and start <= str(r.get("Local Date", "")) <= end
+    ]
+
     # Summary table
     rows_html = []
     for r in results:
@@ -239,9 +247,31 @@ def send_payroll_digest(results: list[dict]) -> None:
             f"</table></div>"
         )
 
+    discrepancy_html = ""
+    if discrepancies:
+        d_rows = "".join(
+            f"<tr><td style='vertical-align:top'>{d.get('Local Date', '')}</td>"
+            f"<td style='vertical-align:top'><b>{d.get('Worker', '')}</b></td>"
+            f"<td>{d.get('Message', '')}</td></tr>"
+            for d in discrepancies
+        )
+        discrepancy_html = (
+            f"<div style='background:#fff3e0;border-left:5px solid #ef6c00;"
+            f"padding:12px 18px;margin:14px 0;font-family:sans-serif'>"
+            f"<h3 style='margin:0 0 8px 0;color:#bf360c'>⚠️ {len(discrepancies)} hours discrepancy "
+            f"report(s) flagged this period — review before paying</h3>"
+            f"<table cellpadding='6' style='border-collapse:collapse;font-size:14px;width:100%'>"
+            f"<tr style='background:#ffe0b2'><th align='left'>Date</th><th align='left'>Worker</th>"
+            f"<th align='left'>What they said</th></tr>"
+            f"{d_rows}"
+            f"</table></div>"
+        )
+
     html = (
         f"<h2 style='font-family:sans-serif'>Payroll — {start} → {end}</h2>"
         f"<p style='font-family:sans-serif;color:#555'>Auto-generated. Detail in the Timesheet tab of the Payroll sheet.</p>"
+
+        f"{discrepancy_html}"
 
         f"<h3 style='font-family:sans-serif;margin-top:18px'>Summary</h3>"
         f"<table border='1' cellpadding='8' style='border-collapse:collapse;font-family:sans-serif;font-size:14px'>"

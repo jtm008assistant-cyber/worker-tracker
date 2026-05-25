@@ -117,6 +117,48 @@ def calculate_pay(worker: dict, daily_rows: list[dict]) -> dict:
     }
 
 
+def current_open_period(period: str | None = None, ref: date | None = None) -> tuple[date, date]:
+    """Return the bounds of the CURRENTLY OPEN period (the one workers are
+    in right now, not yet paid out). Used for in-flight hour checks.
+
+    Semimonthly: 1st-14th if today <= 14, else 15th-EOM.
+    """
+    period = period or config.PAYROLL_PERIOD
+    ref = ref or datetime.now(ZoneInfo(config.MANAGER_TZ)).date()
+    if period == "semimonthly":
+        if ref.day <= 14:
+            return ref.replace(day=1), ref.replace(day=14)
+        last = (ref.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        return ref.replace(day=15), last
+    # For other period types, return a sensible "this period" approximation
+    if period == "weekly":
+        days_since_mon = ref.weekday()
+        monday = ref - timedelta(days=days_since_mon)
+        sunday = monday + timedelta(days=6)
+        return monday, sunday
+    if period == "monthly":
+        first = ref.replace(day=1)
+        last = (first + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        return first, last
+    # Default: just return today
+    return ref, ref
+
+
+def worker_period_totals(worker: dict, start: date, end: date) -> dict:
+    """Sum a worker's Active Hours over the period from the Daily Summary tab.
+    Returns the same shape as calculate_pay so callers can format consistently.
+    """
+    all_summaries = sheets.summaries_in_range(start.isoformat(), end.isoformat())
+    worker_rows = [r for r in all_summaries if str(r.get("Worker", "")).strip() == worker["name"]]
+    if not worker_rows:
+        return {
+            "days_worked": 0, "total_hours": 0.0, "regular_hours": 0.0,
+            "overtime_hours": 0.0, "regular_pay": 0.0, "overtime_pay": 0.0,
+            "gross_pay": 0.0,
+        }
+    return calculate_pay(worker, worker_rows)
+
+
 def run_payroll(period: str | None = None, ref: date | None = None) -> list[dict]:
     """Generate the most-recently-completed pay period's payroll. Returns
     a list of {worker, calc, period_start, period_end} dicts. Skips workers

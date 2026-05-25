@@ -121,6 +121,9 @@ PAYROLL_DEFAULT_OT_THRESHOLD = float(os.environ.get("PAYROLL_DEFAULT_OT_THRESHOL
 PAYROLL_DEFAULT_OT_MULTIPLIER = float(os.environ.get("PAYROLL_DEFAULT_OT_MULTIPLIER", "1.5"))
 PAYROLL_DEFAULT_CURRENCY = os.environ.get("PAYROLL_DEFAULT_CURRENCY", "USD")
 
+# Pre-payroll review DM — sent the evening BEFORE payroll runs (14th + last day of month for semimonthly)
+PRE_PAYROLL_REVIEW_TIME = os.environ.get("PRE_PAYROLL_REVIEW_TIME", "20:00")  # 8pm manager-local
+
 EOD_PATTERNS = (
     r"\beod\b",
     r"\blogging off\b", r"\blog off\b", r"\bsigning off\b",
@@ -155,4 +158,22 @@ BREAK_START_PATTERNS = (
 BREAK_END_PATTERNS = (
     r"\bi'?m back\b", r"\bback from break\b", r"\bback from lunch\b",
     r"\bresumed\b", r"\bresuming\b", r"\bunpause\b",
+)
+
+# Worker asks how many hours they've worked — Sam replies with their period total
+HOURS_QUERY_PATTERNS = (
+    r"^\s*hours?\s*\??\s*$",
+    r"\bmy hours\b", r"\bhow many hours\b", r"\bhours this period\b",
+    r"\bperiod total\b", r"\bhours total\b", r"\bpay period\b",
+    r"\bcheck (?:my )?hours\b",
+)
+
+# Worker flags that their tracked hours are wrong
+DISCREPANCY_PATTERNS = (
+    r"\bwrong\b", r"\bincorrect\b", r"\bdiscrepancy\b",
+    r"\bmissed (?:a |my |the )?(?:break|lunch|hour|time)\b",
+    r"\byou missed\b", r"\bnot accurate\b", r"\bnot right\b",
+    r"\bthat'?s wrong\b", r"\bthat'?s not right\b",
+    r"\bactually (?:worked|i worked)\b", r"\bshould be\b",
+    r"\boff by\b",
 )

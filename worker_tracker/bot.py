@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import config, sheets, report, analyzer
+from . import config, sheets, report, analyzer, payroll
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
@@ -28,6 +28,8 @@ _eod_re = re.compile("|".join(config.EOD_PATTERNS), re.IGNORECASE)
 _help_re = re.compile("|".join(config.HELP_PATTERNS), re.IGNORECASE)
 _break_start_re = re.compile("|".join(config.BREAK_START_PATTERNS), re.IGNORECASE)
 _break_end_re = re.compile("|".join(config.BREAK_END_PATTERNS), re.IGNORECASE)
+_hours_query_re = re.compile("|".join(config.HOURS_QUERY_PATTERNS), re.IGNORECASE)
+_discrepancy_re = re.compile("|".join(config.DISCREPANCY_PATTERNS), re.IGNORECASE)
 
 scheduler = BackgroundScheduler()
 _app = None  # set in main()
@@ -74,6 +76,33 @@ def is_break_start(text: str) -> bool:
 
 def is_break_end(text: str) -> bool:
     return bool(_break_end_re.search(text or ""))
+
+
+def is_hours_query(text: str) -> bool:
+    return bool(_hours_query_re.search(text or ""))
+
+
+def is_discrepancy(text: str) -> bool:
+    return bool(_discrepancy_re.search(text or ""))
+
+
+def _format_hours_summary(worker: dict) -> str:
+    """Compute and format this worker's current pay-period hours for them."""
+    start, end = payroll.current_open_period()
+    totals = payroll.worker_period_totals(worker, start, end)
+    first = worker["name"].split()[0] if worker["name"] else "you"
+    if totals["total_hours"] == 0:
+        return f"hey {first}, no hours logged yet for this period ({start} → {end}). nothing to show yet 👀"
+    ot_line = ""
+    if totals["overtime_hours"]:
+        ot_line = f" ({totals['regular_hours']}h regular + {totals['overtime_hours']}h OT)"
+    return (
+        f"hey {first} — pay period {start} → {end} so far:\n"
+        f"• {totals['days_worked']} days worked\n"
+        f"• {totals['total_hours']}h total{ot_line}\n\n"
+        f"if anything looks off (missed a break, missed a login, etc.), just message me with details "
+        f"and I'll flag it for review before payroll."
+    )
 
 
 def _interval_for(user_id: str) -> int:
@@ -221,14 +250,40 @@ def handle_message(event, client) -> None:
         LOGGED_IN_TODAY.pop(user_id, None)
         ON_BREAK.pop(user_id, None)
         summary = report.write_worker_summary(worker)
+        break_note = f" ({summary['break_hours']}h on break)" if summary.get("break_hours") else ""
         client.chat_postMessage(
             channel=user_id,
             text=(
-                f"alright {first}, you're out 👋 {summary['active_hours']}h, "
-                f"{len(summary['checkins'])} check-ins. catch you tomorrow."
+                f"alright {first}, you're out 👋 {summary['active_hours']}h active{break_note}, "
+                f"{len(summary['checkins'])} check-ins. catch you tomorrow.\n\n"
+                f"if those hours look wrong (missed a break, missed a login, etc.) just message me "
+                f"with details — I'll flag it for review."
             ),
         )
         return
+
+    # Worker asking for their current pay-period hours
+    if is_hours_query(text):
+        try:
+            client.chat_postMessage(channel=user_id, text=_format_hours_summary(worker))
+        except Exception:
+            log.exception("hours summary failed for %s", user_id)
+        return
+
+    # Worker flagging an hours discrepancy — log it for manager review
+    if is_discrepancy(text):
+        sheets.append_event(worker["name"], user_id, "hours_discrepancy", text, worker["tz"])
+        try:
+            client.chat_postMessage(
+                channel=user_id,
+                text=(
+                    f"got it {first} — I logged that as a discrepancy for Jan to review before "
+                    f"payroll runs. add anything else if you want more context."
+                ),
+            )
+        except Exception:
+            pass
+        # Don't return — also treat as a normal check-in (it's still activity)
 
     if LOGGED_IN_TODAY.get(user_id) != today:
         LOGGED_IN_TODAY[user_id] = today
@@ -364,6 +419,44 @@ def schedule_daily_digest() -> None:
     log.info("Daily digest scheduled %s %s", config.REPORT_TIME_LOCAL, config.MANAGER_TZ)
 
 
+def send_pre_payroll_review_dms() -> None:
+    """DM every active worker their current pay-period totals, asking them to
+    flag any discrepancies before payroll runs tomorrow. Fired the evening
+    before payday (14th + last-day-of-month for semimonthly schedule).
+    """
+    if _app is None:
+        return
+    reload_roster()
+    for user_id, worker in WORKERS.items():
+        try:
+            text = _format_hours_summary(worker)
+            # Add a more pointed prompt since payroll is imminent
+            text += "\n\npayroll runs tomorrow morning — reply by then if anything's off 🙏"
+            _app.client.chat_postMessage(channel=user_id, text=text)
+            sheets.append_event(worker["name"], user_id, "pre_payroll_review", "", worker["tz"])
+        except Exception:
+            log.exception("Pre-payroll DM failed for %s", worker["name"])
+
+
+def schedule_pre_payroll_reviews() -> None:
+    """For semimonthly: DM workers on the 14th and last day of month at PRE_PAYROLL_REVIEW_TIME."""
+    if config.PAYROLL_PERIOD != "semimonthly":
+        return
+    hh, mm = map(int, config.PRE_PAYROLL_REVIEW_TIME.split(":"))
+    tz = ZoneInfo(config.MANAGER_TZ)
+    scheduler.add_job(
+        send_pre_payroll_review_dms, "cron",
+        day=14, hour=hh, minute=mm, timezone=tz,
+        id="prepayroll_review_14",
+    )
+    scheduler.add_job(
+        send_pre_payroll_review_dms, "cron",
+        day="last", hour=hh, minute=mm, timezone=tz,
+        id="prepayroll_review_eom",
+    )
+    log.info("Pre-payroll review DMs scheduled: 14th + last-of-month at %s %s", config.PRE_PAYROLL_REVIEW_TIME, config.MANAGER_TZ)
+
+
 def schedule_payroll() -> None:
     if config.PAYROLL_PERIOD == "none":
         log.info("PAYROLL_PERIOD=none, payroll cron disabled")
@@ -436,6 +529,7 @@ def main() -> None:
     schedule_daily_digest()
     schedule_weekly_synthesis()
     schedule_payroll()
+    schedule_pre_payroll_reviews()
     log.info("Starting Socket Mode handler. Ctrl-C to stop.")
     SocketModeHandler(_app, config.SLACK_APP_TOKEN).start()
 
