@@ -32,6 +32,7 @@ SHARED_DRIVE_ID = os.environ.get("SHARED_DRIVE_ID")
 SHEETS_FOLDER_ID = os.environ.get("SHEETS_FOLDER_ID")
 
 TRACKER_SHEET_ID = os.environ.get("WORKER_TRACKER_SHEET_ID")
+PAYROLL_SHEET_ID = os.environ.get("PAYROLL_SHEET_ID")
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN")
@@ -59,7 +60,10 @@ ACTIVITY_TAB = "Activity Log"
 SUMMARY_TAB = "Daily Summary"
 PROFILE_TAB = "Worker Profile"
 
-ROSTER_HEADER = ["Name", "Slack User ID", "Email", "Timezone", "Expected Start", "Expected EOD", "Active"]
+ROSTER_HEADER = [
+    "Name", "Slack User ID", "Email", "Timezone", "Expected Start", "Expected EOD", "Active",
+    "Pay Type", "Hourly Rate", "Currency", "Overtime Threshold (h/wk)", "Overtime Multiplier",
+]
 ACTIVITY_HEADER = ["Timestamp UTC", "Local Date", "Local Time", "Worker", "Slack User ID", "Type", "Message"]
 SUMMARY_HEADER = [
     "Date", "Worker", "Login (local)", "EOD (local)", "Active Hours",
@@ -78,6 +82,21 @@ PROFILE_HEADER = [
 WEEKLY_SYNTHESIS_DOW = int(os.environ.get("WEEKLY_SYNTHESIS_DOW", "6"))  # 0=Mon, 6=Sun
 WEEKLY_SYNTHESIS_TIME = os.environ.get("WEEKLY_SYNTHESIS_TIME", "21:00")
 
+# Payroll
+PAYROLL_TAB = "Payroll"
+PAYROLL_HEADER = [
+    "Period Start", "Period End", "Worker", "Slack User ID", "Pay Type",
+    "Days Worked", "Total Hours", "Regular Hours", "Overtime Hours",
+    "Hourly Rate", "Regular Pay", "Overtime Pay", "Gross Pay", "Currency",
+    "Notes", "Generated At",
+]
+PAYROLL_PERIOD = os.environ.get("PAYROLL_PERIOD", "semimonthly")  # semimonthly | weekly | biweekly | monthly | none
+PAYROLL_RUN_TIME = os.environ.get("PAYROLL_RUN_TIME", "10:00")  # late enough that all yesterday EODs are written
+PAYROLL_DM_WORKERS = os.environ.get("PAYROLL_DM_WORKERS", "false").lower() in ("true", "1", "yes")
+PAYROLL_DEFAULT_OT_THRESHOLD = float(os.environ.get("PAYROLL_DEFAULT_OT_THRESHOLD", "40"))
+PAYROLL_DEFAULT_OT_MULTIPLIER = float(os.environ.get("PAYROLL_DEFAULT_OT_MULTIPLIER", "1.5"))
+PAYROLL_DEFAULT_CURRENCY = os.environ.get("PAYROLL_DEFAULT_CURRENCY", "USD")
+
 EOD_PATTERNS = (
     r"\beod\b", r"\blogging off\b", r"\blog off\b", r"\bsigning off\b",
     r"\bdone for the day\b", r"\bcalling it\b", r"\boff the clock\b",
@@ -89,4 +108,15 @@ HELP_PATTERNS = (
     r"\bhelp\b", r"\bstuck\b", r"\bblocked\b", r"\bissue\b", r"\bproblem\b",
     r"\bcan'?t\b", r"\bnot sure\b", r"\bconfused\b", r"\bbroken\b",
     r"\berror\b", r"\bdoesn'?t work\b", r"\?",
+)
+
+BREAK_START_PATTERNS = (
+    r"\bbreak\b", r"\b-break\b", r"\bbrb\b", r"\bafk\b", r"\bbio\b",
+    r"\blunch\b", r"\bstepping away\b", r"\bbe right back\b",
+    r"\btaking a break\b", r"\bgoing on break\b", r"\bgoing for a break\b",
+    r"\bpause\b", r"\bpausing\b",
+)
+BREAK_END_PATTERNS = (
+    r"\bi'?m back\b", r"\bback from break\b", r"\bback from lunch\b",
+    r"\bresumed\b", r"\bresuming\b", r"\bunpause\b",
 )

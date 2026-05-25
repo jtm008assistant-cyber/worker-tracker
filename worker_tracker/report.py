@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import yagmail
 
-from . import config, sheets, analyzer
+from . import config, sheets, analyzer, payroll
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +31,8 @@ def collect_worker_day(worker: dict, local_date: str) -> dict:
     checkins: List[tuple[datetime, str]] = []
     help_reqs: List[tuple[datetime, str]] = []
     missed = 0
+    break_hours = 0.0
+    open_break_start: datetime | None = None
     for r in rows:
         ts = _parse_ts(r["Timestamp UTC"])
         t = r["Type"]
@@ -39,6 +41,9 @@ def collect_worker_day(worker: dict, local_date: str) -> dict:
             login_ts = ts
         elif t == "eod":
             eod_ts = ts
+            if open_break_start:
+                break_hours += (ts - open_break_start).total_seconds() / 3600
+                open_break_start = None
         elif t == "checkin":
             checkins.append((ts, msg))
         elif t == "help_request":
@@ -46,6 +51,16 @@ def collect_worker_day(worker: dict, local_date: str) -> dict:
             checkins.append((ts, msg))
         elif t == "missed_checkin":
             missed += 1
+        elif t == "break_start":
+            open_break_start = ts
+        elif t == "break_end":
+            if open_break_start:
+                break_hours += (ts - open_break_start).total_seconds() / 3600
+                open_break_start = None
+    # If we end the day still on break (no break_end recorded), don't count
+    # the open break — most likely they forgot. Cap at "until now or EOD".
+    if open_break_start and eod_ts:
+        break_hours += (eod_ts - open_break_start).total_seconds() / 3600
 
     try:
         tz = ZoneInfo(worker["tz"])
@@ -56,7 +71,9 @@ def collect_worker_day(worker: dict, local_date: str) -> dict:
         return t.astimezone(tz).strftime("%H:%M") if t else "—"
 
     end_for_hours = eod_ts or (datetime.now(timezone.utc) if login_ts else None)
-    active = _hours(login_ts, end_for_hours)
+    raw_hours = _hours(login_ts, end_for_hours)
+    active = max(0.0, round(raw_hours - break_hours, 2))
+    break_hours = round(break_hours, 2)
 
     status = "OK"
     notes: List[str] = []
@@ -100,6 +117,7 @@ def collect_worker_day(worker: dict, local_date: str) -> dict:
         "login_local": hhmm(login_ts),
         "eod_local": hhmm(eod_ts),
         "active_hours": active,
+        "break_hours": break_hours,
         "checkins": local_checkins,
         "help_reqs": local_help,
         "missed": missed,
@@ -121,16 +139,86 @@ def write_worker_summary(worker: dict) -> dict:
         tz = ZoneInfo("UTC")
     local_date = datetime.now(tz).date().isoformat()
     s = collect_worker_day(worker, local_date)
+    notes = s["notes"]
+    if s.get("break_hours"):
+        notes = (notes + "; " if notes else "") + f"{s['break_hours']}h on break"
     sheets.append_summary([
         s["date"], s["worker"], s["login_local"], s["eod_local"],
         s["active_hours"], len(s["checkins"]), len(s["help_reqs"]), s["missed"],
-        s["status"], s["notes"],
+        s["status"], notes,
         s["day_summary"],
         " • ".join(s["automation_opportunities"]),
         " • ".join(s["manual_red_flags"]),
         s["capacity_signal"],
     ])
     return s
+
+
+def send_payroll_digest(results: list[dict]) -> None:
+    """Email the manager a payroll summary for the just-closed pay period.
+    `results` comes from payroll.run_payroll().
+    """
+    if not results:
+        log.info("Payroll: no results, skipping email")
+        return
+    if not config.GMAIL_USER or not config.GMAIL_APP_PASSWORD:
+        log.warning("Gmail not configured; skipping payroll email")
+        return
+
+    start = results[0]["period_start"].isoformat()
+    end = results[0]["period_end"].isoformat()
+    total = sum(r["calc"]["gross_pay"] for r in results)
+    currency = results[0]["worker"].get("currency", config.PAYROLL_DEFAULT_CURRENCY)
+
+    rows_html = []
+    for r in results:
+        w = r["worker"]
+        c = r["calc"]
+        rate = w.get("hourly_rate") or 0
+        ot_note = f"({c['regular_hours']}h reg + {c['overtime_hours']}h OT)" if c["overtime_hours"] else ""
+        pay_type = w.get("pay_type", "hourly")
+        gross_html = f"<b>{currency} {c['gross_pay']:,.2f}</b>" if pay_type != "salaried" else "<i>salaried</i>"
+        rows_html.append(
+            f"<tr>"
+            f"<td>{w['name']}</td>"
+            f"<td>{pay_type}</td>"
+            f"<td>{c['days_worked']}</td>"
+            f"<td>{c['total_hours']}h {ot_note}</td>"
+            f"<td>{currency} {rate}/h</td>"
+            f"<td>{gross_html}</td>"
+            f"</tr>"
+        )
+
+    html = (
+        f"<h2 style='font-family:sans-serif'>Payroll — {start} → {end}</h2>"
+        f"<p style='font-family:sans-serif;color:#555'>Generated automatically. Review before processing payouts.</p>"
+        f"<table border='1' cellpadding='8' style='border-collapse:collapse;font-family:sans-serif;font-size:14px'>"
+        f"<tr style='background:#222;color:#fff'>"
+        f"<th>Worker</th><th>Pay Type</th><th>Days</th><th>Hours</th><th>Rate</th><th>Gross</th>"
+        f"</tr>"
+        f"{''.join(rows_html)}"
+        f"</table>"
+        f"<p style='font-family:sans-serif;font-size:120%;margin-top:14px'>"
+        f"Total payroll this period: <b>{currency} {total:,.2f}</b></p>"
+        f"<p style='font-family:sans-serif;color:#888;font-size:90%'>"
+        f"Detail rows are in the Payroll sheet. "
+        f"Salaried workers show $0 here because they're paid on their salary, not hours.</p>"
+    )
+
+    yag = yagmail.SMTP(config.GMAIL_USER, config.GMAIL_APP_PASSWORD)
+    yag.send(
+        to=config.REPORT_RECIPIENT,
+        subject=f"Payroll {start} → {end} — {currency} {total:,.2f}",
+        contents=html,
+    )
+    log.info("Payroll digest emailed to %s (%d workers, %s %.2f total)",
+             config.REPORT_RECIPIENT, len(results), currency, total)
+
+
+def run_and_send_payroll() -> None:
+    """Cron entry point: run payroll for the just-closed period and email it."""
+    results = payroll.run_payroll()
+    send_payroll_digest(results)
 
 
 def _color(status: str) -> str:
@@ -196,8 +284,9 @@ def build_html(date_str: str, sections: List[dict]) -> str:
             f"<span style='color:{_color(s['status'])}'>· {s['status']}</span> "
             f"{_capacity_badge(s['capacity_signal'])}</h3>"
             f"<p style='margin:0;color:#444'>Login {s['login_local']} → EOD {s['eod_local']} · "
-            f"<b>{s['active_hours']}h</b> · "
-            f"{len(s['checkins'])} check-ins · {len(s['help_reqs'])} help · {s['missed']} missed</p>"
+            f"<b>{s['active_hours']}h</b>"
+            + (f" <span style='color:#888'>({s['break_hours']}h on break)</span>" if s.get('break_hours') else "")
+            + f" · {len(s['checkins'])} check-ins · {len(s['help_reqs'])} help · {s['missed']} missed</p>"
             f"{summary_block}"
             f"{profile_block}"
             f"<details style='margin-top:6px'><summary style='cursor:pointer;color:#555'>Check-in replies</summary>"

@@ -33,6 +33,12 @@ def open_tracker() -> gspread.Spreadsheet:
     return gsclient().open_by_key(config.TRACKER_SHEET_ID)
 
 
+def open_payroll() -> gspread.Spreadsheet:
+    if not config.PAYROLL_SHEET_ID:
+        raise RuntimeError("PAYROLL_SHEET_ID not set in .env — run setup_worker_sheet.py first")
+    return gsclient().open_by_key(config.PAYROLL_SHEET_ID)
+
+
 def append_event(worker_name: str, slack_user_id: str, event_type: str, message: str, tz_name: str) -> None:
     ws = open_tracker().worksheet(config.ACTIVITY_TAB)
     now_utc = datetime.now(timezone.utc)
@@ -66,6 +72,13 @@ def load_roster() -> List[dict]:
         uid = str(r.get("Slack User ID", "")).strip()
         if not uid:
             continue
+        def _f(key: str, default: float = 0.0) -> float:
+            try:
+                v = str(r.get(key, "")).strip().replace("$", "").replace(",", "")
+                return float(v) if v else default
+            except (TypeError, ValueError):
+                return default
+
         workers.append({
             "name": str(r.get("Name", "")).strip() or uid,
             "user_id": uid,
@@ -73,8 +86,34 @@ def load_roster() -> List[dict]:
             "tz": str(r.get("Timezone") or "UTC").strip(),
             "expected_start": str(r.get("Expected Start") or "").strip(),
             "expected_eod": str(r.get("Expected EOD") or "").strip(),
+            "pay_type": (str(r.get("Pay Type") or "hourly").strip().lower() or "hourly"),
+            "hourly_rate": _f("Hourly Rate"),
+            "currency": str(r.get("Currency") or config.PAYROLL_DEFAULT_CURRENCY).strip(),
+            "ot_threshold": _f("Overtime Threshold (h/wk)", config.PAYROLL_DEFAULT_OT_THRESHOLD),
+            "ot_multiplier": _f("Overtime Multiplier", config.PAYROLL_DEFAULT_OT_MULTIPLIER),
         })
     return workers
+
+
+def append_payroll(row: List) -> None:
+    """Append one row to the *separate* payroll sheet (not the tracker sheet)."""
+    ws = open_payroll().worksheet(config.PAYROLL_TAB)
+    ws.append_row(row, value_input_option="USER_ENTERED")
+
+
+def summaries_in_range(start_iso: str, end_iso: str, slack_user_id: str | None = None) -> list[dict]:
+    """Daily Summary rows whose Date column is between start_iso and end_iso (inclusive)."""
+    ws = open_tracker().worksheet(config.SUMMARY_TAB)
+    out = []
+    for r in ws.get_all_records():
+        d = str(r.get("Date", "")).strip()
+        if not d or d < start_iso or d > end_iso:
+            continue
+        if slack_user_id and str(r.get("Worker", "")) and r.get("Slack User ID") != slack_user_id:
+            # Daily Summary doesn't have a Slack User ID column — fallback to name match upstream
+            pass
+        out.append(r)
+    return out
 
 
 def activity_rows(local_date_iso: str | None = None) -> List[dict]:

@@ -4,6 +4,7 @@ Usage:
     python -m worker_tracker bot            # start the Slack bot + scheduler (default if no args)
     python -m worker_tracker weekly         # run the weekly profile synthesis once, now
     python -m worker_tracker digest         # send the daily EOD digest once, now
+    python -m worker_tracker payroll        # run payroll for the just-closed period and email it
 """
 from __future__ import annotations
 
@@ -21,8 +22,11 @@ def main() -> None:
     elif cmd == "digest":
         from . import report
         report.send_daily_digest()
+    elif cmd == "payroll":
+        from . import report
+        report.run_and_send_payroll()
     else:
-        sys.exit(f"Unknown command: {cmd}. Try: bot | weekly | digest")
+        sys.exit(f"Unknown command: {cmd}. Try: bot | weekly | digest | payroll")
 
 
 if __name__ == "__main__":

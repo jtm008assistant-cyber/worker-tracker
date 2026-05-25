@@ -26,6 +26,8 @@ log = logging.getLogger("worker_tracker.bot")
 
 _eod_re = re.compile("|".join(config.EOD_PATTERNS), re.IGNORECASE)
 _help_re = re.compile("|".join(config.HELP_PATTERNS), re.IGNORECASE)
+_break_start_re = re.compile("|".join(config.BREAK_START_PATTERNS), re.IGNORECASE)
+_break_end_re = re.compile("|".join(config.BREAK_END_PATTERNS), re.IGNORECASE)
 
 scheduler = BackgroundScheduler()
 _app = None  # set in main()
@@ -33,6 +35,7 @@ _app = None  # set in main()
 WORKERS: dict[str, dict] = {}          # user_id -> roster dict
 LOGGED_IN_TODAY: dict[str, str] = {}   # user_id -> local_date_iso
 PROMPT_PENDING: dict[str, datetime] = {}
+ON_BREAK: dict[str, datetime] = {}     # user_id -> break_start_utc
 
 
 def reload_roster() -> None:
@@ -56,6 +59,14 @@ def is_eod(text: str) -> bool:
 
 def has_help(text: str) -> bool:
     return bool(_help_re.search(text or ""))
+
+
+def is_break_start(text: str) -> bool:
+    return bool(_break_start_re.search(text or ""))
+
+
+def is_break_end(text: str) -> bool:
+    return bool(_break_end_re.search(text or ""))
 
 
 def schedule_next_prompt(user_id: str) -> None:
@@ -134,12 +145,58 @@ def handle_message(event, client) -> None:
 
     worker = WORKERS[user_id]
     today = _local_today(worker)
+    first = worker["name"].split()[0] if worker["name"] else "you"
 
     PROMPT_PENDING.pop(user_id, None)
     try:
         scheduler.remove_job(f"miss:{user_id}")
     except Exception:
         pass
+
+    # --- Break handling ---
+    # If they're already on break, any message resumes them (unless it's another
+    # break-start keyword, in which case just remind them they're still paused).
+    if user_id in ON_BREAK:
+        if is_break_start(text) and not is_break_end(text) and not is_eod(text):
+            try:
+                client.chat_postMessage(channel=user_id, text="already paused — message me when you're back 👌")
+            except Exception:
+                pass
+            return
+        break_start_ts = ON_BREAK.pop(user_id)
+        duration_min = (datetime.now(timezone.utc) - break_start_ts).total_seconds() / 60
+        sheets.append_event(
+            worker["name"], user_id, "break_end",
+            f"break duration: {duration_min:.0f}min",
+            worker["tz"],
+        )
+        try:
+            client.chat_postMessage(
+                channel=user_id,
+                text=f"welcome back {first}! that was a {duration_min:.0f}min break — back on the clock 🙌",
+            )
+        except Exception:
+            pass
+        # Don't return — the current message also counts as a check-in (fall through)
+
+    # If not on break, and the message looks like a break-start, pause them.
+    elif is_break_start(text) and not is_eod(text):
+        # Only valid if they're already clocked in today
+        if LOGGED_IN_TODAY.get(user_id) == today:
+            ON_BREAK[user_id] = datetime.now(timezone.utc)
+            try:
+                scheduler.remove_job(f"prompt:{user_id}")
+            except Exception:
+                pass
+            sheets.append_event(worker["name"], user_id, "break_start", text, worker["tz"])
+            try:
+                client.chat_postMessage(
+                    channel=user_id,
+                    text=f"got it {first} — paused the clock 🛑 message me anything when you're back",
+                )
+            except Exception:
+                pass
+            return
 
     if is_eod(text):
         sheets.append_event(worker["name"], user_id, "eod", text, worker["tz"])
@@ -148,8 +205,8 @@ def handle_message(event, client) -> None:
         except Exception:
             pass
         LOGGED_IN_TODAY.pop(user_id, None)
+        ON_BREAK.pop(user_id, None)
         summary = report.write_worker_summary(worker)
-        first = worker["name"].split()[0] if worker["name"] else "you"
         client.chat_postMessage(
             channel=user_id,
             text=(
@@ -163,7 +220,6 @@ def handle_message(event, client) -> None:
         LOGGED_IN_TODAY[user_id] = today
         sheets.append_event(worker["name"], user_id, "login", text, worker["tz"])
         schedule_next_prompt(user_id)
-        first = worker["name"].split()[0] if worker["name"] else "you"
         hours = config.CHECKIN_INTERVAL_MINUTES // 60
         mins = config.CHECKIN_INTERVAL_MINUTES % 60
         cadence = f"{hours}h" if mins == 0 else f"{hours}h{mins}m"
@@ -220,6 +276,40 @@ def schedule_daily_digest() -> None:
     log.info("Daily digest scheduled %s %s", config.REPORT_TIME_LOCAL, config.MANAGER_TZ)
 
 
+def schedule_payroll() -> None:
+    if config.PAYROLL_PERIOD == "none":
+        log.info("PAYROLL_PERIOD=none, payroll cron disabled")
+        return
+    hh, mm = map(int, config.PAYROLL_RUN_TIME.split(":"))
+    tz = ZoneInfo(config.MANAGER_TZ)
+    if config.PAYROLL_PERIOD == "semimonthly":
+        # Pay on the 1st (covers prior 15th-EOM) and 15th (covers 1st-14th).
+        for day in (1, 15):
+            scheduler.add_job(
+                report.run_and_send_payroll, "cron",
+                day=day, hour=hh, minute=mm, timezone=tz,
+                id=f"payroll_day{day}",
+            )
+        log.info("Payroll cron scheduled: 1st + 15th at %s %s", config.PAYROLL_RUN_TIME, config.MANAGER_TZ)
+        return
+    if config.PAYROLL_PERIOD in ("weekly", "biweekly"):
+        # Run Monday morning (after Sunday-ending workweek closes).
+        scheduler.add_job(
+            report.run_and_send_payroll, "cron",
+            day_of_week=0, hour=hh, minute=mm, timezone=tz,
+            id="payroll_weekly",
+        )
+        log.info("Payroll cron scheduled: Mondays at %s %s (%s)", config.PAYROLL_RUN_TIME, config.MANAGER_TZ, config.PAYROLL_PERIOD)
+        return
+    if config.PAYROLL_PERIOD == "monthly":
+        scheduler.add_job(
+            report.run_and_send_payroll, "cron",
+            day=1, hour=hh, minute=mm, timezone=tz,
+            id="payroll_monthly",
+        )
+        log.info("Payroll cron scheduled: 1st of month at %s %s", config.PAYROLL_RUN_TIME, config.MANAGER_TZ)
+
+
 def schedule_weekly_synthesis() -> None:
     hh, mm = map(int, config.WEEKLY_SYNTHESIS_TIME.split(":"))
     dow = config.WEEKLY_SYNTHESIS_DOW
@@ -257,6 +347,7 @@ def main() -> None:
     restore_state()
     schedule_daily_digest()
     schedule_weekly_synthesis()
+    schedule_payroll()
     log.info("Starting Socket Mode handler. Ctrl-C to stop.")
     SocketModeHandler(_app, config.SLACK_APP_TOKEN).start()
 
