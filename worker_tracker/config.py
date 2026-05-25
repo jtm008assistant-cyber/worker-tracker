@@ -98,10 +98,22 @@ PAYROLL_DEFAULT_OT_MULTIPLIER = float(os.environ.get("PAYROLL_DEFAULT_OT_MULTIPL
 PAYROLL_DEFAULT_CURRENCY = os.environ.get("PAYROLL_DEFAULT_CURRENCY", "USD")
 
 EOD_PATTERNS = (
-    r"\beod\b", r"\blogging off\b", r"\blog off\b", r"\bsigning off\b",
-    r"\bdone for the day\b", r"\bcalling it\b", r"\boff the clock\b",
-    r"\bclocking out\b", r"\bclocked out\b", r"\bshutting down\b",
-    r"\bgoodnight\b", r"\bgn\b", r"\bwrapping up\b", r"\bsee you tomorrow\b",
+    r"\beod\b",
+    r"\blogging off\b", r"\blog off\b", r"\bsigning off\b",
+    r"\blogging out\b", r"\blogged out\b",
+    r"\bdone for the day\b", r"\bdone for now\b",
+    r"\bdone (?:with )?(?:my |the )?shift\b",        # "done my shift", "done with my shift"
+    r"\bshift (?:done|over|ended|finished)\b",       # "shift over", "shift done"
+    r"\b(?:ending|finishing|wrapping up) (?:my |the )?shift\b",
+    r"\bcalling it\b", r"\bcalling it a day\b",
+    r"\boff the clock\b",
+    r"\bclocking out\b", r"\bclocked out\b",
+    r"\bshutting down\b",
+    r"\bgoodnight\b", r"\bgn\b",
+    r"\bwrapping up\b",
+    r"\bsee you tomorrow\b", r"\bsee ya\b",
+    r"\bi'?m out\b", r"\bim out\b",
+    r"\bheading out\b",
 )
 
 HELP_PATTERNS = (
