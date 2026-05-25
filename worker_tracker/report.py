@@ -157,8 +157,8 @@ def write_worker_summary(worker: dict) -> dict:
 
 
 def send_payroll_digest(results: list[dict]) -> None:
-    """Email the manager a payroll summary for the just-closed pay period.
-    `results` comes from payroll.run_payroll().
+    """Email the bookkeeper/manager a payroll summary for the just-closed period.
+    Goes to PAYROLL_RECIPIENT (can be comma-separated for multiple recipients).
     """
     if not results:
         log.info("Payroll: no results, skipping email")
@@ -172,6 +172,7 @@ def send_payroll_digest(results: list[dict]) -> None:
     total = sum(r["calc"]["gross_pay"] for r in results)
     currency = results[0]["worker"].get("currency", config.PAYROLL_DEFAULT_CURRENCY)
 
+    # Summary table
     rows_html = []
     for r in results:
         w = r["worker"]
@@ -179,42 +180,96 @@ def send_payroll_digest(results: list[dict]) -> None:
         rate = w.get("hourly_rate") or 0
         ot_note = f"({c['regular_hours']}h reg + {c['overtime_hours']}h OT)" if c["overtime_hours"] else ""
         pay_type = w.get("pay_type", "hourly")
-        gross_html = f"<b>{currency} {c['gross_pay']:,.2f}</b>" if pay_type != "salaried" else "<i>salaried</i>"
+        rate_str = f"{currency} {rate}/h" if pay_type == "hourly" else f"{currency} {w.get('salary_per_period', 0)} salary"
         rows_html.append(
             f"<tr>"
             f"<td>{w['name']}</td>"
             f"<td>{pay_type}</td>"
             f"<td>{c['days_worked']}</td>"
             f"<td>{c['total_hours']}h {ot_note}</td>"
-            f"<td>{currency} {rate}/h</td>"
-            f"<td>{gross_html}</td>"
+            f"<td>{rate_str}</td>"
+            f"<td><b>{currency} {c['gross_pay']:,.2f}</b></td>"
             f"</tr>"
+        )
+
+    # Per-worker daily breakdown (paste-ready for bookkeeper)
+    daily_html = []
+    for r in results:
+        w = r["worker"]
+        c = r["calc"]
+        pay_type = w.get("pay_type", "hourly")
+        rate = float(w.get("hourly_rate") or 0)
+        day_rows = []
+        for row in r.get("daily_rows", []):
+            d = str(row.get("Date", ""))
+            try:
+                dow = datetime.fromisoformat(d).strftime("%a")
+            except Exception:
+                dow = ""
+            hours = row.get("Active Hours", "")
+            login_l = row.get("Login (local)", "")
+            eod_l = row.get("EOD (local)", "")
+            notes = row.get("Notes", "")
+            try:
+                pay_for_day = f"{currency} {float(hours) * rate:,.2f}" if pay_type == "hourly" and hours else ""
+            except (TypeError, ValueError):
+                pay_for_day = ""
+            day_rows.append(
+                f"<tr>"
+                f"<td>{d}</td><td>{dow}</td>"
+                f"<td>{login_l} → {eod_l}</td>"
+                f"<td>{hours}h</td>"
+                f"<td>{pay_for_day}</td>"
+                f"<td style='color:#888'>{notes}</td>"
+                f"</tr>"
+            )
+        salary_line = ""
+        if pay_type == "salaried":
+            salary_line = f"<p style='margin:6px 0;color:#1565c0'><b>Salary this period: {currency} {w.get('salary_per_period', 0):,.2f}</b></p>"
+        daily_html.append(
+            f"<div style='border-left:4px solid #1565c0;padding:8px 14px;margin:18px 0;background:#fafafa'>"
+            f"<h3 style='margin:0 0 4px 0'>{w['name']} — {currency} {c['gross_pay']:,.2f}</h3>"
+            f"<p style='margin:2px 0;color:#444'>{c['days_worked']} days worked · {c['total_hours']}h total"
+            + (f" ({c['regular_hours']}h reg + {c['overtime_hours']}h OT × {w.get('ot_multiplier', 1.5)})" if c["overtime_hours"] else "")
+            + "</p>"
+            f"{salary_line}"
+            f"<table cellpadding='6' style='border-collapse:collapse;font-family:sans-serif;font-size:13px;margin-top:8px;width:100%'>"
+            f"<tr style='background:#eee'><th>Date</th><th>Day</th><th>In → Out</th><th>Hours</th><th>Day Pay</th><th>Notes</th></tr>"
+            f"{''.join(day_rows)}"
+            f"</table></div>"
         )
 
     html = (
         f"<h2 style='font-family:sans-serif'>Payroll — {start} → {end}</h2>"
-        f"<p style='font-family:sans-serif;color:#555'>Generated automatically. Review before processing payouts.</p>"
+        f"<p style='font-family:sans-serif;color:#555'>Auto-generated. Detail in the Timesheet tab of the Payroll sheet.</p>"
+
+        f"<h3 style='font-family:sans-serif;margin-top:18px'>Summary</h3>"
         f"<table border='1' cellpadding='8' style='border-collapse:collapse;font-family:sans-serif;font-size:14px'>"
         f"<tr style='background:#222;color:#fff'>"
-        f"<th>Worker</th><th>Pay Type</th><th>Days</th><th>Hours</th><th>Rate</th><th>Gross</th>"
+        f"<th>Worker</th><th>Pay Type</th><th>Days</th><th>Hours</th><th>Rate / Salary</th><th>Gross</th>"
         f"</tr>"
         f"{''.join(rows_html)}"
         f"</table>"
-        f"<p style='font-family:sans-serif;font-size:120%;margin-top:14px'>"
-        f"Total payroll this period: <b>{currency} {total:,.2f}</b></p>"
-        f"<p style='font-family:sans-serif;color:#888;font-size:90%'>"
-        f"Detail rows are in the Payroll sheet. "
-        f"Salaried workers show $0 here because they're paid on their salary, not hours.</p>"
+        f"<p style='font-family:sans-serif;font-size:130%;margin:14px 0'>"
+        f"Total payout: <b>{currency} {total:,.2f}</b></p>"
+
+        f"<h3 style='font-family:sans-serif;margin-top:24px'>Per-worker daily breakdown</h3>"
+        f"{''.join(daily_html)}"
     )
+
+    recipients = [e.strip() for e in str(config.PAYROLL_RECIPIENT or "").split(",") if e.strip()]
+    if not recipients:
+        log.warning("PAYROLL_RECIPIENT empty, skipping email")
+        return
 
     yag = yagmail.SMTP(config.GMAIL_USER, config.GMAIL_APP_PASSWORD)
     yag.send(
-        to=config.REPORT_RECIPIENT,
+        to=recipients,
         subject=f"Payroll {start} → {end} — {currency} {total:,.2f}",
         contents=html,
     )
     log.info("Payroll digest emailed to %s (%d workers, %s %.2f total)",
-             config.REPORT_RECIPIENT, len(results), currency, total)
+             recipients, len(results), currency, total)
 
 
 def run_and_send_payroll() -> None:

@@ -110,8 +110,12 @@ def main() -> None:
     sample = [
         "Alice Example", "U01ABCDEF", "alice@example.com",
         "America/New_York", "09:00", "17:00", "TRUE",
-        "hourly", "25", "USD", "40", "1.5",
-        "",  # Check-in Frequency: blank = use global default (120 min). Override per-worker, e.g. 90 for tighter, 180 for looser.
+        "hourly",   # Pay Type: hourly | salaried
+        "25",       # Hourly Rate (for hourly workers; ignored if salaried)
+        "",         # Salary (per period) — for salaried workers, the fixed amount they get each pay period
+        "USD",
+        "40", "1.5",
+        "",         # Check-in Frequency: blank = use global default (120 min)
     ]
     roster.update(values=[wt.ROSTER_HEADER, sample], range_name="A1", value_input_option="USER_ENTERED")
     _format_header(roster, wt.ROSTER_HEADER)
@@ -143,6 +147,11 @@ def main() -> None:
     payroll_ws.resize(rows=1000, cols=len(wt.PAYROLL_HEADER))
     payroll_ws.update(values=[wt.PAYROLL_HEADER], range_name="A1", value_input_option="USER_ENTERED")
     _format_header(payroll_ws, wt.PAYROLL_HEADER)
+
+    # Timesheet tab — per-day breakdown for bookkeeper
+    timesheet_ws = ps.add_worksheet(title=wt.TIMESHEET_TAB, rows=5000, cols=len(wt.TIMESHEET_HEADER))
+    timesheet_ws.update(values=[wt.TIMESHEET_HEADER], range_name="A1", value_input_option="USER_ENTERED")
+    _format_header(timesheet_ws, wt.TIMESHEET_HEADER)
 
     # Print summary
     print()

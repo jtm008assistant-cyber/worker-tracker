@@ -97,12 +97,19 @@ def load_roster() -> List[dict]:
             "expected_eod": str(r.get("Expected EOD") or "").strip(),
             "pay_type": (str(r.get("Pay Type") or "hourly").strip().lower() or "hourly"),
             "hourly_rate": _f("Hourly Rate"),
+            "salary_per_period": _f("Salary (per period)"),
             "currency": str(r.get("Currency") or config.PAYROLL_DEFAULT_CURRENCY).strip(),
             "ot_threshold": _f("Overtime Threshold (h/wk)", config.PAYROLL_DEFAULT_OT_THRESHOLD),
             "ot_multiplier": _f("Overtime Multiplier", config.PAYROLL_DEFAULT_OT_MULTIPLIER),
             "checkin_interval_min": checkin_interval,
         })
     return workers
+
+
+def append_timesheet(row: List) -> None:
+    """Append one row to the Timesheet tab on the payroll sheet."""
+    ws = open_payroll().worksheet(config.TIMESHEET_TAB)
+    ws.append_row(row, value_input_option="USER_ENTERED")
 
 
 def append_payroll(row: List) -> None:

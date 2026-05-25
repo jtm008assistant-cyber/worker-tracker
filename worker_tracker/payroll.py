@@ -97,11 +97,14 @@ def calculate_pay(worker: dict, daily_rows: list[dict]) -> dict:
             overtime += h - ot_threshold
 
     if pay_type == "salaried":
+        salary = float(worker.get("salary_per_period") or 0)
         regular_pay = 0.0
         overtime_pay = 0.0
+        gross_pay = salary
     else:
         regular_pay = regular * rate
         overtime_pay = overtime * rate * ot_multiplier
+        gross_pay = regular_pay + overtime_pay
 
     return {
         "days_worked": len([r for r in daily_rows if str(r.get("Active Hours", "0") or 0) not in ("", "0")]),
@@ -110,7 +113,7 @@ def calculate_pay(worker: dict, daily_rows: list[dict]) -> dict:
         "overtime_hours": round(overtime, 2),
         "regular_pay": round(regular_pay, 2),
         "overtime_pay": round(overtime_pay, 2),
-        "gross_pay": round(regular_pay + overtime_pay, 2),
+        "gross_pay": round(gross_pay, 2),
     }
 
 
@@ -149,15 +152,52 @@ def run_payroll(period: str | None = None, ref: date | None = None) -> list[dict
             calc["days_worked"], calc["total_hours"],
             calc["regular_hours"], calc["overtime_hours"],
             w.get("hourly_rate", 0),
+            w.get("salary_per_period", 0),
             calc["regular_pay"], calc["overtime_pay"], calc["gross_pay"],
             w.get("currency", config.PAYROLL_DEFAULT_CURRENCY),
             "", generated_at,
         ])
+
+        # Per-day timesheet rows for bookkeeper review
+        rate = float(w.get("hourly_rate") or 0)
+        pay_type = w.get("pay_type", "hourly")
+        for r in worker_rows:
+            try:
+                day_date = date.fromisoformat(str(r.get("Date", "")).strip())
+            except (TypeError, ValueError):
+                continue
+            try:
+                hours = float(str(r.get("Active Hours", "0") or 0).replace(",", ""))
+            except (TypeError, ValueError):
+                hours = 0.0
+            notes = str(r.get("Notes", "")).strip()
+            break_h = ""
+            # Daily Summary "Notes" carries "Xh on break" — parse that for the timesheet
+            import re as _re
+            m = _re.search(r"([\d.]+)h on break", notes)
+            if m:
+                try:
+                    break_h = float(m.group(1))
+                except ValueError:
+                    break_h = ""
+            daily_pay = round(hours * rate, 2) if pay_type == "hourly" else ""
+            sheets.append_timesheet([
+                start.isoformat(), end.isoformat(),
+                w["name"], w["user_id"],
+                day_date.isoformat(),
+                day_date.strftime("%A"),
+                str(r.get("Login (local)", "")), str(r.get("EOD (local)", "")),
+                hours, break_h,
+                pay_type, rate, daily_pay,
+                notes,
+            ])
+
         results.append({
             "worker": w,
             "calc": calc,
             "period_start": start,
             "period_end": end,
+            "daily_rows": worker_rows,
         })
 
     return results

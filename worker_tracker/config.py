@@ -40,6 +40,9 @@ SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN")
 GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
 REPORT_RECIPIENT = os.environ.get("REPORT_RECIPIENT") or GMAIL_USER
+# PAYROLL_RECIPIENT can be one email or comma-separated list (e.g. manager + bookkeeper)
+# Falls back to REPORT_RECIPIENT if not set.
+PAYROLL_RECIPIENT = os.environ.get("PAYROLL_RECIPIENT") or REPORT_RECIPIENT
 
 MANAGER_TZ = os.environ.get("MANAGER_TZ", "America/New_York")
 REPORT_TIME_LOCAL = os.environ.get("REPORT_TIME_LOCAL", "22:00")
@@ -63,7 +66,8 @@ KNOWLEDGE_TAB = "Processes & Tools"
 
 ROSTER_HEADER = [
     "Name", "Slack User ID", "Email", "Timezone", "Expected Start", "Expected EOD", "Active",
-    "Pay Type", "Hourly Rate", "Currency", "Overtime Threshold (h/wk)", "Overtime Multiplier",
+    "Pay Type", "Hourly Rate", "Salary (per period)", "Currency",
+    "Overtime Threshold (h/wk)", "Overtime Multiplier",
     "Check-in Frequency (min)",
 ]
 ACTIVITY_HEADER = ["Timestamp UTC", "Local Date", "Local Time", "Worker", "Slack User ID", "Type", "Message"]
@@ -100,8 +104,15 @@ PAYROLL_TAB = "Payroll"
 PAYROLL_HEADER = [
     "Period Start", "Period End", "Worker", "Slack User ID", "Pay Type",
     "Days Worked", "Total Hours", "Regular Hours", "Overtime Hours",
-    "Hourly Rate", "Regular Pay", "Overtime Pay", "Gross Pay", "Currency",
+    "Hourly Rate", "Salary (per period)",
+    "Regular Pay", "Overtime Pay", "Gross Pay", "Currency",
     "Notes", "Generated At",
+]
+TIMESHEET_TAB = "Timesheet"
+TIMESHEET_HEADER = [
+    "Period Start", "Period End", "Worker", "Slack User ID", "Date",
+    "Day of Week", "Login", "EOD", "Hours Worked", "Break Hours",
+    "Pay Type", "Rate", "Daily Pay", "Notes",
 ]
 PAYROLL_PERIOD = os.environ.get("PAYROLL_PERIOD", "semimonthly")  # semimonthly | weekly | biweekly | monthly | none
 PAYROLL_RUN_TIME = os.environ.get("PAYROLL_RUN_TIME", "10:00")  # late enough that all yesterday EODs are written
