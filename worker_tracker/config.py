@@ -65,7 +65,8 @@ PROFILE_TAB = "Worker Profile"
 KNOWLEDGE_TAB = "Processes & Tools"
 
 ROSTER_HEADER = [
-    "Name", "Slack User ID", "Email", "Timezone", "Expected Start", "Expected EOD", "Active",
+    "Name", "Slack User ID", "Work Email", "Wise Email",
+    "Timezone", "Expected Start", "Expected EOD", "Active",
     "Pay Type", "Hourly Rate", "Salary (per period)", "Currency",
     "Overtime Threshold (h/wk)", "Overtime Multiplier",
     "Check-in Frequency (min)", "Personal View Sheet URL",

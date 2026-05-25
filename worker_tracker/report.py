@@ -189,9 +189,11 @@ def send_payroll_digest(results: list[dict]) -> None:
         ot_note = f"({c['regular_hours']}h reg + {c['overtime_hours']}h OT)" if c["overtime_hours"] else ""
         pay_type = w.get("pay_type", "hourly")
         rate_str = f"{currency} {rate}/h" if pay_type == "hourly" else f"{currency} {w.get('salary_per_period', 0)} salary"
+        wise = w.get("wise_email") or "<i style='color:#a00'>no wise email on roster</i>"
         rows_html.append(
             f"<tr>"
             f"<td>{w['name']}</td>"
+            f"<td><code>{wise}</code></td>"
             f"<td>{pay_type}</td>"
             f"<td>{c['days_worked']}</td>"
             f"<td>{c['total_hours']}h {ot_note}</td>"
@@ -276,7 +278,7 @@ def send_payroll_digest(results: list[dict]) -> None:
         f"<h3 style='font-family:sans-serif;margin-top:18px'>Summary</h3>"
         f"<table border='1' cellpadding='8' style='border-collapse:collapse;font-family:sans-serif;font-size:14px'>"
         f"<tr style='background:#222;color:#fff'>"
-        f"<th>Worker</th><th>Pay Type</th><th>Days</th><th>Hours</th><th>Rate / Salary</th><th>Gross</th>"
+        f"<th>Worker</th><th>Wise Email (for payout)</th><th>Pay Type</th><th>Days</th><th>Hours</th><th>Rate / Salary</th><th>Gross</th>"
         f"</tr>"
         f"{''.join(rows_html)}"
         f"</table>"

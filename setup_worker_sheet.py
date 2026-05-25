@@ -108,7 +108,9 @@ def main() -> None:
     roster.update_title(wt.ROSTER_TAB)
     roster.resize(rows=50, cols=len(wt.ROSTER_HEADER))
     sample = [
-        "Alice Example", "U01ABCDEF", "alice@example.com",
+        "Alice Example", "U01ABCDEF",
+        "alice@heygirltea.com",     # Work Email — communication, personal view sheet sharing
+        "alice.wise@example.com",   # Wise Email — used by bookkeeper to send payouts via Wise
         "America/New_York", "09:00", "17:00", "TRUE",
         "hourly",   # Pay Type: hourly | salaried
         "25",       # Hourly Rate (for hourly workers; ignored if salaried)
@@ -116,7 +118,7 @@ def main() -> None:
         "USD",
         "40", "1.5",
         "",         # Check-in Frequency: blank = use global default (120 min)
-        "",         # Personal View Sheet URL — auto-populated by bot on first login (or python -m worker_tracker create_views)
+        "",         # Personal View Sheet URL — auto-populated by bot on first login
     ]
     roster.update(values=[wt.ROSTER_HEADER, sample], range_name="A1", value_input_option="USER_ENTERED")
     _format_header(roster, wt.ROSTER_HEADER)
