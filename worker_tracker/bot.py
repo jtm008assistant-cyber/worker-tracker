@@ -352,9 +352,10 @@ def handle_message(event, client) -> None:
                     client.chat_postMessage(channel=user_id, text=f"can't relay messages to {target['name'].split()[0]} — owner-level only.")
                     return
                 try:
+                    sender_name = WORKERS[user_id]["name"] if user_id in WORKERS else user_id
                     client.chat_postMessage(channel=target["user_id"], text=message_to_send)
                     sheets.append_event(target["name"], target["user_id"], "admin_forward",
-                                       f"from {worker['name']}: {message_to_send[:100]}", target["tz"])
+                                       f"from {sender_name}: {message_to_send[:100]}", target["tz"])
                     client.chat_postMessage(channel=user_id, text=f"✓ sent to {target['name']}")
                 except Exception as e:
                     log.exception("admin forward failed")
