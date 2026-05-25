@@ -93,8 +93,9 @@ def load_roster() -> List[dict]:
             "user_id": uid,
             # Work email used for everyday communication + sharing their personal view sheet
             "email": str(r.get("Work Email") or r.get("Email") or "").strip(),
-            # Wise email used by the bookkeeper to send payouts (often different from work email)
-            "wise_email": str(r.get("Wise Email", "")).strip(),
+            # Payout details — could be Wise, e-Transfer, PayPal, direct deposit, etc.
+            "payout_email": str(r.get("Payout Email") or r.get("Wise Email") or "").strip(),
+            "payout_method": (str(r.get("Payout Method") or "").strip().lower() or "wise"),
             "tz": str(r.get("Timezone") or "UTC").strip(),
             "expected_start": str(r.get("Expected Start") or "").strip(),
             "expected_eod": str(r.get("Expected EOD") or "").strip(),

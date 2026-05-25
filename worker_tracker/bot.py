@@ -313,12 +313,19 @@ def handle_message(event, client) -> None:
             except Exception:
                 log.exception("Failed to provision view sheet for %s", worker["name"])
 
+        # On the very first login (no profile yet), ask their usual schedule.
+        # On subsequent logins, skip — we already have it.
+        schedule_q = ""
+        if not sheets.load_profile(user_id):
+            schedule_q = "\n\nbtw what's your usual schedule? roughly when do you start and wrap up most days?"
+
         client.chat_postMessage(
             channel=user_id,
             text=(
                 f"hey {first}! got you in 🙌 I'll loop back every {cadence} to see "
                 f"how things are going. shoot me 'EOD' whenever you wrap up."
                 + view_intro
+                + schedule_q
             ),
         )
         return

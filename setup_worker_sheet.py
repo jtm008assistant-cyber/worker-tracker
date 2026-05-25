@@ -110,14 +110,15 @@ def main() -> None:
     sample = [
         "Alice Example", "U01ABCDEF",
         "alice@heygirltea.com",     # Work Email — communication, personal view sheet sharing
-        "alice.wise@example.com",   # Wise Email — used by bookkeeper to send payouts via Wise
+        "alice.wise@example.com",   # Payout Email — destination for whichever payout method
+        "wise",                     # Payout Method — wise | etransfer | paypal | direct deposit | other
         "America/New_York", "09:00", "17:00", "TRUE",
-        "hourly",   # Pay Type: hourly | salaried
+        "hourly",   # Pay Type: hourly | salaried (or 'salary')
         "25",       # Hourly Rate (for hourly workers; ignored if salaried)
-        "",         # Salary (per period) — for salaried workers, the fixed amount they get each pay period
+        "",         # Salary (per period) — for salaried workers, the fixed amount per pay period
         "USD",
         "40", "1.5",
-        "",         # Check-in Frequency: blank = use global default (120 min)
+        "",         # Check-in Frequency: blank = global default (120 min). Override per worker.
         "",         # Personal View Sheet URL — auto-populated by bot on first login
     ]
     roster.update(values=[wt.ROSTER_HEADER, sample], range_name="A1", value_input_option="USER_ENTERED")
