@@ -496,6 +496,12 @@ def handle_message(event, client) -> None:
             try:
                 snapshot = _format_worker_status(target)
                 client.chat_postMessage(channel=user_id, text=snapshot)
+            except sheets.RateLimited:
+                log.warning("status snapshot rate-limited for %s", target["name"])
+                client.chat_postMessage(
+                    channel=user_id,
+                    text=f"give me a sec — Google's rate-limiting me. try again in ~30s and I'll have {target['name'].split()[0]}'s status 🙏",
+                )
             except Exception as e:
                 log.exception("status snapshot failed for %s", target["name"])
                 client.chat_postMessage(channel=user_id, text=f"hit an error checking on {target['name']}: {e}")

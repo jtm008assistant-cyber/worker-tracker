@@ -1,9 +1,18 @@
-"""Google Sheets I/O — Roster, Activity Log, Daily Summary tabs."""
+"""Google Sheets I/O — Roster, Activity Log, Daily Summary tabs.
+
+Includes a small caching + retry layer because we were hitting Google's
+default 60 reads/min/user quota on bursty admin queries. See _ttl_cache and
+_with_429_retry below — if you touch this file, keep both honored.
+"""
 from __future__ import annotations
 
 import logging
+import random
+import threading
+import time
 from datetime import datetime, timezone
-from typing import List
+from functools import wraps
+from typing import Any, Callable, List
 from zoneinfo import ZoneInfo
 
 import gspread
@@ -15,11 +24,107 @@ from . import config
 log = logging.getLogger(__name__)
 
 
+class RateLimited(Exception):
+    """Raised when Sheets API 429s persist past the retry budget. The bot
+    catches this and shows a friendly 'Sam is rate-limited, try again' to the
+    user instead of the raw stack trace."""
+
+
+# ---------------------------------------------------------------------------
+# Retry layer: wrap any gspread read so transient 429 / 5xx auto-backoff.
+# ---------------------------------------------------------------------------
+
+def _with_429_retry(fn: Callable) -> Callable:
+    """Retry a Sheets-API call with exponential backoff on 429 / 5xx errors.
+
+    Total budget ~25s across 5 attempts. After that we raise RateLimited so
+    the bot layer can show a friendly message rather than blasting the raw
+    APIError stack trace at the user (which is what triggered this whole
+    rebuild after Jan saw a 429 dump from a 'is jonny working' query).
+    """
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        delays = [1.0, 2.0, 4.0, 8.0, 10.0]  # ~25s total
+        last_exc: Exception | None = None
+        for i, delay in enumerate([0.0] + delays):
+            if delay:
+                # Jitter so 5 concurrent handlers don't sync up on retries.
+                time.sleep(delay + random.uniform(0, 0.5))
+            try:
+                return fn(*args, **kwargs)
+            except gspread.exceptions.APIError as e:
+                last_exc = e
+                code = None
+                try:
+                    code = int(e.response.status_code)  # type: ignore[union-attr]
+                except Exception:
+                    pass
+                if code == 429 or (code is not None and 500 <= code < 600):
+                    log.warning("Sheets API %s on %s, attempt %d/%d, backing off %.1fs",
+                                code, fn.__name__, i + 1, len(delays) + 1, delays[i] if i < len(delays) else 0)
+                    continue
+                raise  # non-retryable APIError, bubble up
+        # Budget exhausted — convert to RateLimited so callers can handle nicely
+        raise RateLimited(
+            f"Sheets API rate-limited after {len(delays) + 1} attempts on {fn.__name__}"
+        ) from last_exc
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
+# TTL cache: thread-safe, keyed by function name + args.
+# ---------------------------------------------------------------------------
+
+_CACHE: dict[tuple, tuple[float, Any]] = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def _ttl_cache(seconds: float) -> Callable:
+    """Decorator: cache the result of fn(*args, **kwargs) for `seconds`.
+
+    Args must be hashable. Used here to coalesce the constant hammering of
+    load_roster() / activity_rows() / all_profiles() that every handler does.
+    Bursts of admin DMs were costing us 20+ reads each — with this, the same
+    burst costs ~1.
+    """
+    def decorator(fn: Callable) -> Callable:
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = (fn.__name__, args, tuple(sorted(kwargs.items())))
+            now = time.monotonic()
+            with _CACHE_LOCK:
+                hit = _CACHE.get(key)
+                if hit and (now - hit[0]) < seconds:
+                    return hit[1]
+            val = fn(*args, **kwargs)
+            with _CACHE_LOCK:
+                _CACHE[key] = (now, val)
+            return val
+        # Expose an invalidator so write-paths can punch out stale entries.
+        def _invalidate(*args, **kwargs) -> None:
+            with _CACHE_LOCK:
+                if not args and not kwargs:
+                    # Invalidate ALL entries for this function
+                    keys_to_drop = [k for k in _CACHE if k[0] == fn.__name__]
+                    for k in keys_to_drop:
+                        _CACHE.pop(k, None)
+                else:
+                    key = (fn.__name__, args, tuple(sorted(kwargs.items())))
+                    _CACHE.pop(key, None)
+        wrapper.invalidate = _invalidate  # type: ignore[attr-defined]
+        return wrapper
+    return decorator
+
+
 def _creds() -> Credentials:
     return Credentials.from_service_account_file(config.SERVICE_ACCOUNT_JSON, scopes=config.SCOPES)
 
 
+@_ttl_cache(seconds=300)
 def gsclient() -> gspread.Client:
+    """Cached for 5 min — reusing the authorized client avoids repeated
+    OAuth token exchanges on every API call. Token has its own ~1h lifetime
+    so 5 min is well within the safety window."""
     return gspread.authorize(_creds())
 
 
@@ -27,18 +132,21 @@ def drive_service():
     return build("drive", "v3", credentials=_creds(), cache_discovery=False)
 
 
+@_ttl_cache(seconds=300)
 def open_tracker() -> gspread.Spreadsheet:
     if not config.TRACKER_SHEET_ID:
         raise RuntimeError("WORKER_TRACKER_SHEET_ID not set in .env — run setup_worker_sheet.py first")
     return gsclient().open_by_key(config.TRACKER_SHEET_ID)
 
 
+@_ttl_cache(seconds=300)
 def open_payroll() -> gspread.Spreadsheet:
     if not config.PAYROLL_SHEET_ID:
         raise RuntimeError("PAYROLL_SHEET_ID not set in .env — run setup_worker_sheet.py first")
     return gsclient().open_by_key(config.PAYROLL_SHEET_ID)
 
 
+@_with_429_retry
 def append_event(worker_name: str, slack_user_id: str, event_type: str, message: str, tz_name: str) -> None:
     ws = open_tracker().worksheet(config.ACTIVITY_TAB)
     now_utc = datetime.now(timezone.utc)
@@ -47,6 +155,12 @@ def append_event(worker_name: str, slack_user_id: str, event_type: str, message:
     except Exception:
         tz = ZoneInfo("UTC")
     local = now_utc.astimezone(tz)
+    # Append invalidates today's activity cache so subsequent reads see this row.
+    try:
+        activity_rows.invalidate(local.date().isoformat())  # type: ignore[attr-defined]
+        activity_rows.invalidate()  # also drop the no-arg "full log" cache key
+    except Exception:
+        pass
     ws.append_row(
         [
             now_utc.isoformat(timespec="seconds"),
@@ -61,8 +175,16 @@ def append_event(worker_name: str, slack_user_id: str, event_type: str, message:
     )
 
 
+@_ttl_cache(seconds=60)
+@_with_429_retry
 def load_roster() -> List[dict]:
-    """Active workers only. Returns [{name, user_id, email, tz, expected_start, expected_eod}]."""
+    """Active workers only. Returns [{name, user_id, email, tz, expected_start, expected_eod}].
+
+    Cached 60s — Roster changes infrequently (manual edits ~weekly) but
+    reload_roster() is called from 13+ places in bot.py, including at the
+    top of every scheduled handler. Without this we'd spend most of our
+    Sheets read budget re-reading the same tab.
+    """
     ws = open_tracker().worksheet(config.ROSTER_TAB)
     rows = ws.get_all_records()
     workers: List[dict] = []
@@ -130,10 +252,15 @@ def load_roster() -> List[dict]:
     return workers
 
 
+@_with_429_retry
 def append_time_off(row: List) -> None:
     """Append a row to the Time Off tab on the tracker sheet."""
     ws = open_tracker().worksheet(config.TIME_OFF_TAB)
     ws.append_row(row, value_input_option="USER_ENTERED")
+    try:
+        time_off_for_worker.invalidate()  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
 
 def append_commitment(row: List) -> None:
@@ -302,8 +429,11 @@ def mark_commitment_status(slack_user_id: str, commitment_text: str,
     return False
 
 
+@_ttl_cache(seconds=60)
+@_with_429_retry
 def time_off_for_worker(slack_user_id: str, year: int | None = None) -> list[dict]:
-    """Return all Time Off rows for one worker (optionally filtered to a specific year by Start Date)."""
+    """Return all Time Off rows for one worker (optionally filtered to a specific year by Start Date).
+    Cached 60s — append_time_off invalidates."""
     try:
         ws = open_tracker().worksheet(config.TIME_OFF_TAB)
     except Exception:
@@ -351,8 +481,16 @@ def summaries_in_range(start_iso: str, end_iso: str, slack_user_id: str | None =
     return out
 
 
+@_ttl_cache(seconds=20)
+@_with_429_retry
 def activity_rows(local_date_iso: str | None = None) -> List[dict]:
-    """Read full Activity Log (or one day's worth). Cheap for first few months."""
+    """Read full Activity Log (or one day's worth).
+
+    Cached 20s — admin queries like 'is X working' / 'team status' / multiple
+    status pings in succession all hit this. Cache is invalidated by
+    append_event() so newly logged events appear immediately to the writer's
+    own subsequent reads.
+    """
     ws = open_tracker().worksheet(config.ACTIVITY_TAB)
     rows = ws.get_all_records()
     if local_date_iso:
@@ -360,13 +498,20 @@ def activity_rows(local_date_iso: str | None = None) -> List[dict]:
     return rows
 
 
+@_with_429_retry
 def append_summary(row: List) -> None:
     ws = open_tracker().worksheet(config.SUMMARY_TAB)
     ws.append_row(row, value_input_option="USER_ENTERED")
 
 
+@_ttl_cache(seconds=60)
+@_with_429_retry
 def load_profile(slack_user_id: str) -> dict | None:
-    """Return the Worker Profile row for this user, or None if not yet created."""
+    """Return the Worker Profile row for this user, or None if not yet created.
+
+    Cached 60s — profiles are updated once weekly by the synthesis cron, so
+    short cache window is safe and saves a Sheets read on every memory query.
+    """
     try:
         ws = open_tracker().worksheet(config.PROFILE_TAB)
     except Exception:
@@ -378,8 +523,14 @@ def load_profile(slack_user_id: str) -> dict | None:
     return None
 
 
+@_with_429_retry
 def upsert_profile(profile: dict) -> None:
     """Insert or update a single row in the Worker Profile tab, keyed by Slack User ID."""
+    try:
+        load_profile.invalidate()  # type: ignore[attr-defined]
+        all_profiles.invalidate()  # type: ignore[attr-defined]
+    except Exception:
+        pass
     ws = open_tracker().worksheet(config.PROFILE_TAB)
     rows = ws.get_all_values()
     if not rows:
@@ -401,6 +552,8 @@ def upsert_profile(profile: dict) -> None:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
 
 
+@_ttl_cache(seconds=60)
+@_with_429_retry
 def all_profiles() -> list[dict]:
     try:
         ws = open_tracker().worksheet(config.PROFILE_TAB)
@@ -409,8 +562,11 @@ def all_profiles() -> list[dict]:
     return ws.get_all_records()
 
 
+@_ttl_cache(seconds=60)
+@_with_429_retry
 def list_worker_knowledge(slack_user_id: str) -> list[dict]:
-    """Return all Processes & Tools entries for one worker."""
+    """Return all Processes & Tools entries for one worker. Cached 60s — written by
+    upsert_knowledge() which invalidates this cache."""
     try:
         ws = open_tracker().worksheet(config.KNOWLEDGE_TAB)
     except Exception:
@@ -418,9 +574,14 @@ def list_worker_knowledge(slack_user_id: str) -> list[dict]:
     return [r for r in ws.get_all_records() if str(r.get("Slack User ID", "")).strip() == slack_user_id]
 
 
+@_with_429_retry
 def upsert_knowledge(entry: dict) -> str:
     """Insert a new Processes & Tools row OR update an existing one matching
     by (Slack User ID, Name). Returns 'inserted' or 'updated'."""
+    try:
+        list_worker_knowledge.invalidate()  # type: ignore[attr-defined]
+    except Exception:
+        pass
     ws = open_tracker().worksheet(config.KNOWLEDGE_TAB)
     rows = ws.get_all_values()
     if not rows:
@@ -473,8 +634,12 @@ def upsert_knowledge(entry: dict) -> str:
     return "inserted"
 
 
+@_ttl_cache(seconds=30)
+@_with_429_retry
 def activity_since(days_back: int, slack_user_id: str | None = None) -> list[dict]:
-    """All activity from the last N calendar days, optionally filtered by user."""
+    """All activity from the last N calendar days, optionally filtered by user.
+    Cached 30s — primarily hit by 'X hasn't clocked in today' lookback and
+    weekly memory synthesis."""
     from datetime import datetime, timezone, timedelta
     ws = open_tracker().worksheet(config.ACTIVITY_TAB)
     rows = ws.get_all_records()
