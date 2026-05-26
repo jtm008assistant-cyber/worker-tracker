@@ -220,10 +220,14 @@ def _worker_today_snapshot(worker: dict) -> dict:
     }
 
 
-def _format_worker_status(worker: dict) -> str:
-    """Snapshot of where a worker currently is right now. Reads today's
-    Activity Log and pay-period summary, AND includes today's open-session
-    hours (Daily Summary alone misses mid-shift work)."""
+def _format_worker_status(worker: dict, include_today_recap: bool = True) -> str:
+    """Snapshot of where a worker currently is right now PLUS (optionally) a
+    recap of today's check-in messages so admins asking 'what did X do today'
+    see the actual work trail, not just the current state.
+
+    Reads today's Activity Log and pay-period summary, AND includes today's
+    open-session hours (Daily Summary alone misses mid-shift work).
+    """
     from . import payroll as _payroll
     snap = _worker_today_snapshot(worker)
     state = snap["state"]
@@ -291,11 +295,52 @@ def _format_worker_status(worker: dict) -> str:
     elif last_checkin_ts is None:
         last_ck_line = "\nno check-in messages yet today (just logged in)"
 
+    # Today's full check-in trail — only when caller asked for it. This is the
+    # answer to "what did Hannah do today" — every message she sent Sam
+    # describing what she worked on, in order. Capped to ~6 most recent to
+    # keep the DM short.
+    today_recap_block = ""
+    if include_today_recap:
+        try:
+            today_local = _local_today(worker)
+            today_events = [
+                r for r in sheets.activity_rows(today_local)
+                if r.get("Slack User ID") == worker["user_id"]
+                and r.get("Type") in ("checkin", "help_request", "break_start", "break_end", "login", "eod")
+            ]
+            today_events.sort(key=lambda r: r.get("Timestamp UTC", ""))
+            # Build a short trail of just the meaningful entries (skip empty messages)
+            trail_lines = []
+            for r in today_events:
+                t = r.get("Type", "")
+                msg = (r.get("Message") or "").strip()
+                local_t = (r.get("Local Time") or "")[:5]  # "HH:MM"
+                if t == "login":
+                    trail_lines.append(f"  • {local_t} — clocked in")
+                elif t == "eod":
+                    trail_lines.append(f"  • {local_t} — EOD")
+                elif t == "break_start":
+                    trail_lines.append(f"  • {local_t} — break started")
+                elif t == "break_end":
+                    trail_lines.append(f"  • {local_t} — back from break")
+                elif t == "help_request" and msg:
+                    trail_lines.append(f"  • {local_t} — 🆘 {msg[:140]}")
+                elif t == "checkin" and msg:
+                    trail_lines.append(f"  • {local_t} — \"{msg[:140]}\"")
+            # Cap to most recent 8 entries so the DM doesn't sprawl
+            if len(trail_lines) > 8:
+                trail_lines = ["  • …earlier entries truncated…"] + trail_lines[-8:]
+            if trail_lines:
+                today_recap_block = "\n\ntoday's trail:\n" + "\n".join(trail_lines)
+        except Exception:
+            log.exception("today recap build failed for %s", worker["name"])
+
     return (
         f"{header}\n"
         f"clocked in at {login_str} {worker['tz']} · {hours_so_far:.2f}h on the clock today"
         f"{last_ck_line}\n"
         f"{period_line}"
+        f"{today_recap_block}"
     )
 
 
@@ -479,7 +524,27 @@ def handle_message(event, client) -> None:
         m = _admin_status_re.search(text)
         if m:
             query = next((g for g in m.groups() if g), "").strip()
-            query = re.sub(r"\s+(?:doing|up|working|going|online|on|here)$", "", query, flags=re.IGNORECASE).strip()
+            # Trim trailing filler so "what did Hannah do today" → "Hannah", not "Hannah do today".
+            # Past-tense patterns capture the worker name + filler tail; strip common verbs/adverbs.
+            query = re.sub(
+                r"\s+(?:doing|up|working|going|online|on|here|today|yesterday|this morning|"
+                r"this afternoon|so far|recently|now|right now|do|done|been|"
+                r"work|works|worked|finish|finished|wrap|wrapped|clock|clocked|log|logged|"
+                r"sign|signed|EOD|start|started)$",
+                "", query, flags=re.IGNORECASE,
+            ).strip()
+            # Repeat in case multiple filler words trail (e.g. "Hannah do today")
+            for _ in range(3):
+                stripped = re.sub(
+                    r"\s+(?:doing|up|working|going|online|on|here|today|yesterday|this morning|"
+                    r"this afternoon|so far|recently|now|right now|do|done|been|"
+                    r"work|works|worked|finish|finished|wrap|wrapped|clock|clocked|log|logged|"
+                    r"sign|signed|EOD|start|started)$",
+                    "", query, flags=re.IGNORECASE,
+                ).strip()
+                if stripped == query:
+                    break
+                query = stripped
             matches = _find_worker_by_name(query)
             if not matches:
                 client.chat_postMessage(channel=user_id, text=f"don't know anyone named '{query}' on the roster — try just their first name?")
@@ -856,6 +921,15 @@ def handle_message(event, client) -> None:
             if not reply and was_responding_to_prompt:
                 # Gemini SKIPped but we MUST ack — fallback canned thanks
                 reply = f"thanks for the update {first}! 🙌"
+            elif not reply and is_admin:
+                # Admin asked something Sam couldn't answer (Gemini SKIPped or errored).
+                # NEVER leave an admin in silence — they'll wonder if Sam is dead.
+                # Generic "I tried but couldn't" is far better than no response.
+                reply = (
+                    f"hmm, i don't have a great answer for that right now {first} — "
+                    f"could you try rephrasing? if you want a specific worker's status "
+                    f"try 'is <name> working' or 'what is <name> doing'."
+                )
             if reply:
                 _dm(client, user_id, reply, event_type="sam_chat")
         except Exception:

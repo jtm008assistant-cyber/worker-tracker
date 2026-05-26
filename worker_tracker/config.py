@@ -317,6 +317,7 @@ ADMIN_RELAY_PATTERNS = (
 # Admins can ask "what is X doing" / "where's X" / "status of X" / etc.
 # The (.+?) captures the worker name (can be partial: "Hannah" matches "Hannah May Bagares").
 ADMIN_STATUS_PATTERNS = (
+    # ----- Present-tense: "what's X doing right now" -----
     # "what's X doing" / "whats X doin" / "what is X up to" / "what are workers doing"
     r"\bwhat(?:'?s| is| are)?\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:doing|doin'?|up to|working on|workin'? on)\b",
     # "how's X doing" / "hows X going" / "how is Hannah doin"
@@ -330,6 +331,16 @@ ADMIN_STATUS_PATTERNS = (
     r"\bcheck (?:on\s+)?([A-Za-z][\w\s'.-]{0,30}?)\b",
     # "is X online/working/here"
     r"\bis\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:online|working|workin'?|on|here|around)\b",
+
+    # ----- Past-tense: "what did X do today" (added after Jan's silence bug) -----
+    # "what did X do today" / "what did X work on" / "what did X accomplish/finish/get done"
+    r"\bwhat did\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:do|work on|accomplish|finish|get done|wrap up|knock out|handle)\b",
+    # "what has X done today" / "what's X done today" / "what has X been working on"
+    r"\bwhat(?:'?s| has)\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:done|been doing|been working on|worked on)\b",
+    # "did X clock in" / "did X log on/in" / "did X start" / "did X EOD"
+    r"\bdid\s+([A-Za-z][\w\s'.-]{0,30}?)\s+(?:clock in|log on|log in|sign in|start (?:today|work)|EOD|finish|wrap)\b",
+    # "how has X been" / "how's X been"
+    r"\bhow(?:'?s| has)\s+([A-Za-z][\w\s'.-]{0,30}?)\s+been\b",
 )
 
 DISCREPANCY_PATTERNS = (
