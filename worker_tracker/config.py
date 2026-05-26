@@ -316,6 +316,16 @@ ADMIN_RELAY_PATTERNS = (
 
 # Admins can ask "what is X doing" / "where's X" / "status of X" / etc.
 # The (.+?) captures the worker name (can be partial: "Hannah" matches "Hannah May Bagares").
+ADMIN_DIGEST_NOW_PATTERNS = (
+    # "send the EOD digest" / "EOD report now" / "give me today's digest" / "run digest"
+    r"\b(?:send|run|trigger|give me|gimme)\s+(?:the\s+|today'?s\s+)?(?:eod|EOD|daily)\s+(?:report|digest|summary)\b",
+    r"\b(?:eod|EOD)\s+(?:report|digest|summary)\s+now\b",
+    r"\bdigest\s+now\b",
+    r"\bsend\s+digest\b",
+    r"\brun\s+the\s+digest\b",
+)
+
+
 ADMIN_STATUS_PATTERNS = (
     # ----- Present-tense: "what's X doing right now" -----
     # "what's X doing" / "whats X doin" / "what is X up to" / "what are workers doing"

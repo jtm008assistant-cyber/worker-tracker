@@ -488,20 +488,183 @@ def run_weekly_synthesis() -> None:
     log.info("Sent weekly profile digest")
 
 
-def send_daily_digest() -> None:
-    if not config.GMAIL_USER or not config.GMAIL_APP_PASSWORD:
-        log.warning("Gmail not configured; skipping email digest")
+def _build_slack_digest_text(today_local: str, sections: list[dict]) -> str:
+    """Build a compact Slack-formatted EOD digest. Slack DMs are best with
+    light markdown (*bold*, • bullets, plain text) — no HTML.
+    """
+    if not sections:
+        return f"*EOD Digest — {today_local}*\n\n(no workers logged in today)"
+
+    lines = [f"*Worker Tracker EOD — {today_local}*", ""]
+
+    # Quick summary row at the top
+    total_hours = sum(s.get("active_hours", 0) or 0 for s in sections)
+    needs_help = [s["worker"] for s in sections if s.get("status") == "Needs help"]
+    possible_slack = [s["worker"] for s in sections if s.get("status") == "Possible slack"]
+    lines.append(f"_{len(sections)} workers active · {total_hours:.1f}h total_")
+    if needs_help:
+        lines.append(f":sos: needs help: {', '.join(needs_help)}")
+    if possible_slack:
+        lines.append(f":warning: possible slack: {', '.join(possible_slack)}")
+    lines.append("")
+
+    for s in sections:
+        status = s.get("status", "OK")
+        emoji = {"OK": ":large_green_circle:", "Needs help": ":sos:",
+                 "Possible slack": ":warning:", "ERROR": ":x:"}.get(status, ":white_circle:")
+        worker = s["worker"]
+        active = s.get("active_hours", 0) or 0
+        login = s.get("login_local", "—")
+        eod = s.get("eod_local", "—")
+        cap = s.get("capacity_signal", "")
+        lines.append(f"{emoji} *{worker}* — {active:.2f}h · login {login} → EOD {eod}"
+                     + (f" · _{cap}_" if cap else ""))
+        if s.get("day_summary"):
+            lines.append(f"  {s['day_summary'][:400]}")
+        if s.get("automation_opportunities"):
+            ao = s["automation_opportunities"]
+            if isinstance(ao, list):
+                ao = "; ".join(str(x) for x in ao)
+            lines.append(f"  :gear: _automation: {str(ao)[:300]}_")
+        if s.get("manual_red_flags"):
+            mrf = s["manual_red_flags"]
+            if isinstance(mrf, list):
+                mrf = "; ".join(str(x) for x in mrf)
+            lines.append(f"  :rotating_light: _manual grind: {str(mrf)[:300]}_")
+        if s.get("notes"):
+            lines.append(f"  _notes: {s['notes']}_")
+        if s.get("new_commitments"):
+            nc = s["new_commitments"]
+            if isinstance(nc, list) and nc:
+                lines.append(f"  :pushpin: _committed: {'; '.join(str(x)[:100] for x in nc[:3])}_")
+        lines.append("")
+
+    lines.append("_Full email digest (with check-in trails) was also sent. DM Sam 'send digest' anytime to force a fresh one._")
+    return "\n".join(lines)
+
+
+def _send_slack_digest(text: str) -> bool:
+    """DM the digest to every owner in config.OWNER_SLACK_IDS using the bot
+    token directly (so this works from scheduler context, not just inside
+    bot.py's bolt app). Returns True if at least one DM succeeded."""
+    if not config.OWNER_SLACK_IDS or not config.SLACK_BOT_TOKEN:
+        log.warning("Slack digest skipped: OWNER_SLACK_IDS or SLACK_BOT_TOKEN unset")
+        return False
+    try:
+        from slack_sdk import WebClient
+    except ImportError:
+        log.warning("slack_sdk not installed; cannot send Slack digest")
+        return False
+    client = WebClient(token=config.SLACK_BOT_TOKEN)
+    ok = False
+    for owner_id in config.OWNER_SLACK_IDS:
+        try:
+            client.chat_postMessage(channel=owner_id, text=text)
+            log.info("Sent Slack EOD digest to %s", owner_id)
+            ok = True
+        except Exception:
+            log.exception("Slack digest DM to %s failed", owner_id)
+    return ok
+
+
+def _notify_owners_of_failure(error_msg: str) -> None:
+    """Last-resort: if the digest can't ship via any channel, DM owners the
+    error directly so we never have a silent miss day."""
+    if not config.OWNER_SLACK_IDS or not config.SLACK_BOT_TOKEN:
         return
+    try:
+        from slack_sdk import WebClient
+        client = WebClient(token=config.SLACK_BOT_TOKEN)
+        for owner_id in config.OWNER_SLACK_IDS:
+            try:
+                client.chat_postMessage(
+                    channel=owner_id,
+                    text=f":x: EOD digest failed to send today.\n```{error_msg[:1500]}```",
+                )
+            except Exception:
+                pass
+    except Exception:
+        log.exception("Could not even send failure notification")
+
+
+def send_daily_digest() -> dict:
+    """Build and ship today's EOD digest via BOTH Slack and email.
+
+    Bulletproof flow:
+      - Per-worker collect_worker_day() errors are caught — one bad worker
+        doesn't kill the whole digest. They show up in the report as 'ERROR'.
+      - If email fails, Slack still ships.
+      - If Slack fails, email still ships.
+      - If BOTH fail, Sam DMs the error to owners so we never miss silently.
+
+    Returns a dict with delivery status for debugging / manual triggers.
+    """
     mgr_tz = ZoneInfo(config.MANAGER_TZ)
     today_local = datetime.now(mgr_tz).date().isoformat()
-    roster = sheets.load_roster()
+    result = {"date": today_local, "workers": 0, "email": False, "slack": False, "errors": []}
+
+    try:
+        roster = sheets.load_roster()
+    except Exception as e:
+        err = f"load_roster failed: {type(e).__name__}: {e}"
+        log.exception("EOD digest: %s", err)
+        result["errors"].append(err)
+        _notify_owners_of_failure(err)
+        return result
+
     sections = []
     for w in roster:
-        s = collect_worker_day(w, today_local)
+        try:
+            s = collect_worker_day(w, today_local)
+        except Exception as e:
+            log.exception("collect_worker_day failed for %s", w["name"])
+            # Still include them in the digest as ERROR so we know
+            sections.append({
+                "worker": w["name"], "date": today_local,
+                "login_local": "ERROR", "eod_local": "—",
+                "active_hours": 0, "status": "ERROR",
+                "day_summary": f"data collection failed: {type(e).__name__}",
+                "automation_opportunities": "", "manual_red_flags": str(e)[:200],
+                "capacity_signal": "", "notes": "", "new_commitments": [],
+                "resolved_commitments": [], "checkins": [], "help_reqs": [],
+                "missed": 0, "break_hours": 0, "profile": None,
+            })
+            continue
         if s["login_local"] == "—":
             continue
         sections.append(s)
-    html = build_html(today_local, sections)
-    yag = yagmail.SMTP(config.GMAIL_USER, config.GMAIL_APP_PASSWORD)
-    yag.send(to=config.REPORT_RECIPIENT, subject=f"Worker Tracker EOD — {today_local}", contents=html)
-    log.info("Sent EOD digest to %s (%d workers)", config.REPORT_RECIPIENT, len(sections))
+    result["workers"] = len(sections)
+
+    # ---- Email ----
+    if not config.GMAIL_USER or not config.GMAIL_APP_PASSWORD:
+        log.warning("Gmail not configured; skipping email digest")
+        result["errors"].append("Gmail not configured (GMAIL_USER/GMAIL_APP_PASSWORD missing)")
+    else:
+        try:
+            html = build_html(today_local, sections)
+            yag = yagmail.SMTP(config.GMAIL_USER, config.GMAIL_APP_PASSWORD)
+            yag.send(to=config.REPORT_RECIPIENT, subject=f"Worker Tracker EOD — {today_local}", contents=html)
+            result["email"] = True
+            log.info("Sent EOD email digest to %s (%d workers)", config.REPORT_RECIPIENT, len(sections))
+        except Exception as e:
+            err = f"email send failed: {type(e).__name__}: {e}"
+            log.exception("EOD digest: %s", err)
+            result["errors"].append(err)
+
+    # ---- Slack ----
+    try:
+        slack_text = _build_slack_digest_text(today_local, sections)
+        if _send_slack_digest(slack_text):
+            result["slack"] = True
+    except Exception as e:
+        err = f"slack send failed: {type(e).__name__}: {e}"
+        log.exception("EOD digest: %s", err)
+        result["errors"].append(err)
+
+    # ---- Last resort ----
+    if not result["email"] and not result["slack"]:
+        _notify_owners_of_failure(
+            f"All EOD delivery channels failed for {today_local}.\n"
+            f"Errors:\n" + "\n".join(result["errors"])
+        )
+    return result

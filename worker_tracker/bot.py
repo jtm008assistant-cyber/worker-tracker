@@ -39,6 +39,7 @@ _timeoff_balance_query_re = re.compile("|".join(config.TIMEOFF_BALANCE_QUERY_PAT
 _admin_drive_audit_re = re.compile("|".join(config.ADMIN_DRIVE_AUDIT_PATTERNS), re.IGNORECASE)
 _admin_forward_re = re.compile("|".join(config.ADMIN_FORWARD_PATTERNS), re.IGNORECASE | re.DOTALL)
 _admin_relay_re = re.compile("|".join(config.ADMIN_RELAY_PATTERNS), re.IGNORECASE)
+_admin_digest_now_re = re.compile("|".join(config.ADMIN_DIGEST_NOW_PATTERNS), re.IGNORECASE)
 
 scheduler = BackgroundScheduler()
 _app = None  # set in main()
@@ -518,6 +519,32 @@ def handle_message(event, client) -> None:
     if is_admin and _admin_relay_re.search(text):
         if _handle_deferred_relay(user_id, text, client):
             return
+
+    # "send the EOD digest" / "digest now" / "EOD report" — manual trigger.
+    # Checked BEFORE the status-name regex so "send digest" doesn't get
+    # mis-parsed as a worker name.
+    if is_admin and _admin_digest_now_re.search(text):
+        try:
+            client.chat_postMessage(channel=user_id, text="on it — building today's EOD digest now… 📊")
+        except Exception:
+            pass
+        try:
+            from . import report as _report
+            result = _report.send_daily_digest()
+            ok_msg = (
+                f"✓ digest sent · workers={result['workers']} · "
+                f"email={'✓' if result['email'] else '✗'} · slack={'✓' if result['slack'] else '✗'}"
+            )
+            if result.get("errors"):
+                ok_msg += "\n_errors:_\n" + "\n".join(f"  • {e}" for e in result["errors"])
+            client.chat_postMessage(channel=user_id, text=ok_msg)
+        except Exception as e:
+            log.exception("manual digest trigger failed")
+            try:
+                client.chat_postMessage(channel=user_id, text=f"digest blew up: {e}")
+            except Exception:
+                pass
+        return
 
     if is_admin:
         # "what is X doing" / "status of X" / etc.
