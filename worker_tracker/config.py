@@ -116,12 +116,13 @@ LIBRARY_HEADER = [
     "Total References", "First Seen", "Last Updated",
 ]
 
-# How aggressively Sam asks follow-up questions when workers mention unfamiliar
-# tools/software/processes. Higher = more curious Sam. Default tuned to ask
-# about every distinct new tool while not overwhelming workers.
+# Sam asks follow-up questions ONLY when a worker is replying to his periodic
+# check-in prompt — that way Sam's curiosity rides on the worker's check-in
+# cadence (every 90/120/180 min per worker) instead of interrupting them at
+# random times. Daily cap is a safety upper bound; cooldown is a softer guard
+# so two rapid replies in the same check-in window don't both trigger asks.
 MAX_FOLLOWUPS_PER_DAY = int(os.environ.get("MAX_FOLLOWUPS_PER_DAY", "5"))
-# Minimum minutes between follow-ups to the same worker
-FOLLOWUP_COOLDOWN_MINUTES = int(os.environ.get("FOLLOWUP_COOLDOWN_MINUTES", "15"))
+FOLLOWUP_COOLDOWN_MINUTES = int(os.environ.get("FOLLOWUP_COOLDOWN_MINUTES", "60"))
 
 WEEKLY_SYNTHESIS_DOW = int(os.environ.get("WEEKLY_SYNTHESIS_DOW", "6"))  # 0=Mon, 6=Sun
 WEEKLY_SYNTHESIS_TIME = os.environ.get("WEEKLY_SYNTHESIS_TIME", "21:00")

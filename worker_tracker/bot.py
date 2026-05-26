@@ -744,6 +744,12 @@ def handle_message(event, client) -> None:
     ev_type = "help_request" if has_help(text) else "checkin"
     sheets.append_event(worker["name"], user_id, ev_type, text, worker["tz"])
     schedule_next_prompt(user_id)
+
+    # Follow-up questions ride on the check-in cadence — only fire when this
+    # message is a reply to Sam's periodic prompt. Outside that window, Sam
+    # stays quiet about new tools so workers aren't getting random pings.
+    _followup_eligible = was_responding_to_prompt
+
     if ev_type == "help_request":
         _dm(client, user_id,
             "noted — flagging this for the manager. drop more detail if you need it sooner.",
@@ -784,8 +790,16 @@ def handle_message(event, client) -> None:
                     event_type="sam_chat_fallback")
 
     # --- Knowledge / follow-up handling ---
+    # Knowledge extraction (saving URLs / tool answers from pending follow-ups)
+    # ALWAYS runs — if Sam already asked something, we save whatever the worker
+    # replies regardless of timing.
+    # NEW follow-up questions only fire when the worker is replying to Sam's
+    # periodic check-in prompt — keeps Sam's curiosity on the check-in cadence.
     try:
-        _handle_knowledge_and_followup(user_id, worker, text, today, client)
+        _handle_knowledge_and_followup(
+            user_id, worker, text, today, client,
+            ask_new_followups=_followup_eligible,
+        )
     except Exception:
         log.exception("knowledge/follow-up step failed for %s", user_id)
 
@@ -797,12 +811,16 @@ def _reset_followups_if_new_day(user_id: str, local_date: str) -> None:
 
 
 def _handle_knowledge_and_followup(user_id: str, worker: dict, text: str,
-                                   today: str, client) -> None:
+                                   today: str, client,
+                                   ask_new_followups: bool = True) -> None:
     """Two-step:
     1) If we asked a follow-up earlier and they're now replying, extract any
        tools/sheets/processes from the reply and save to the Knowledge tab.
-    2) After that (or if no pending), maybe ask a NEW follow-up about
-       something they mentioned. Rate-limited.
+       (Always runs — if Sam asked, Sam saves the answer.)
+    2) If `ask_new_followups` is True, maybe ask a NEW follow-up about
+       something the worker mentioned. Gated by daily cap + cooldown.
+       (Caller passes False when the worker isn't replying to Sam's
+       periodic check-in prompt — keeps Sam's curiosity on cadence.)
     """
     _reset_followups_if_new_day(user_id, today)
     existing = sheets.list_worker_knowledge(user_id)
@@ -825,6 +843,9 @@ def _handle_knowledge_and_followup(user_id: str, worker: dict, text: str,
                 event_type="sam_knowledge_saved")
             # Refresh existing so we don't double-ask about something we just learned
             existing = sheets.list_worker_knowledge(user_id)
+
+    if not ask_new_followups:
+        return
 
     state = FOLLOWUPS_TODAY[user_id]
     if state["count"] >= config.MAX_FOLLOWUPS_PER_DAY:
