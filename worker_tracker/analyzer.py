@@ -47,8 +47,81 @@ def _strip_codefence(text: str) -> str:
     return text.strip()
 
 
+def _extract_json_object(text: str) -> dict | None:
+    """Defensive JSON extraction. Tries:
+      1. Direct json.loads(strict=False) — handles control chars
+      2. Strip everything outside the first balanced {...} block
+      3. Trim a trailing unterminated string + close the JSON (common
+         when Gemini hits max_output_tokens mid-string and we still want
+         to salvage the partial)
+    Returns the parsed dict or None.
+    """
+    text = _strip_codefence(text)
+    if not text:
+        return None
+
+    # 1. Straight parse
+    try:
+        return json.loads(text, strict=False)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Find the first balanced { ... } block via depth counter
+    depth = 0
+    start = None
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                candidate = text[start:i + 1]
+                try:
+                    return json.loads(candidate, strict=False)
+                except json.JSONDecodeError:
+                    break  # not valid, try truncation salvage
+
+    # 3. Truncation salvage: Gemini ran out of tokens mid-string. Find the
+    # last complete "key": "value" pair and close the object.
+    # Pattern: walk back to the last `",` or `"]` or `"}` and close.
+    salvage = text
+    # Strip an opening { ... up through last complete pair
+    last_safe = max(salvage.rfind('",'), salvage.rfind('"]'), salvage.rfind('"}'))
+    if last_safe > 0:
+        # Cut at last_safe + 1 (include the closing ") and close any open braces
+        trimmed = salvage[:last_safe + 1] + "}"
+        try:
+            return json.loads(trimmed, strict=False)
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=2, max=10))
 def _gemini_json(prompt: str, max_tokens: int = 2048) -> dict:
+    """Run a Gemini call expecting JSON output. Robust to:
+      - Markdown code fences around the JSON
+      - Embedded newlines / control chars in strings (json.loads strict=False)
+      - Truncation mid-string at max_output_tokens (salvage parser closes
+        the last valid pair and trims the rest)
+      - Prose preamble before the {...} block (extracts first balanced object)
+    """
     client = genai.Client(api_key=config.GOOGLE_API_KEY)
     resp = client.models.generate_content(
         model=config.GEMINI_MODEL,
@@ -59,7 +132,14 @@ def _gemini_json(prompt: str, max_tokens: int = 2048) -> dict:
             max_output_tokens=max_tokens,
         ),
     )
-    return json.loads(_strip_codefence(resp.text or "{}"), strict=False)
+    raw = resp.text or "{}"
+    parsed = _extract_json_object(raw)
+    if parsed is None:
+        # Log a redacted snippet so future debugging is easier
+        log.warning("_gemini_json: could not extract JSON from %d-char response: %r",
+                    len(raw), raw[:200])
+        raise json.JSONDecodeError("could not parse Gemini response", raw[:200], 0)
+    return parsed
 
 
 def _profile_context_block(profile: dict | None) -> str:
@@ -395,7 +475,12 @@ Respond as JSON ONLY:
 }}
 """
     try:
-        data = _gemini_json(prompt, max_tokens=512)
+        # Bumped 512 → 1024. The full prompt is ~3000 chars; with the old
+        # 512-token ceiling Gemini was getting cut off mid-string in the
+        # "ask" field, breaking JSON parse, and silently returning None
+        # for every single follow-up call. 1024 gives comfortable headroom
+        # for the 35-word ask + the topic field + any JSON whitespace.
+        data = _gemini_json(prompt, max_tokens=1024)
     except Exception as e:
         log.warning("Follow-up generation failed for %s: %s", name, e)
         return None

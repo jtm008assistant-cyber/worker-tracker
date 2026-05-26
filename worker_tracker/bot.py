@@ -1180,7 +1180,19 @@ def sweep_stale_breaks() -> None:
 
 def _retroactively_close_break(slack_user_id: str, start_ts: datetime,
                                 end_ts: datetime, reason: str) -> None:
-    """Write a backdated break_end event for an orphan break_start."""
+    """Write a backdated break_end event for an orphan break_start.
+
+    Uses raw ws.append_row (not append_event) so we can backdate the event
+    timestamp to the actual end_ts — payroll math credits the break duration
+    based on the break_end timestamp, so we MUST preserve the historical
+    time, not stamp 'now'.
+
+    Critical: must invalidate BOTH activity_rows AND activity_since caches
+    after the write. Without this, a sweep pass that runs again within the
+    cache TTL window will see the same orphan break_start in cached data
+    and write a duplicate break_end. (That's the bug that produced 11
+    duplicate close events for Hannah on 2026-05-26 during a deploy churn.)
+    """
     worker = WORKERS.get(slack_user_id)
     if not worker:
         return
@@ -1203,6 +1215,14 @@ def _retroactively_close_break(slack_user_id: str, start_ts: datetime,
         ],
         value_input_option="USER_ENTERED",
     )
+    # Cache invalidation: this write bypasses append_event, so caches
+    # don't auto-invalidate. Punch them out manually so the next sweep
+    # pass sees the break_end we just wrote.
+    try:
+        sheets.activity_rows.invalidate()  # type: ignore[attr-defined]
+        sheets.activity_since.invalidate()  # type: ignore[attr-defined]
+    except Exception:
+        pass
     log.info("Auto-closed break for %s (%s): %.0fmin", worker["name"], reason, dur_min)
 
 
