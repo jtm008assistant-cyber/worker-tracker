@@ -416,6 +416,61 @@ Rules:
     return cleaned
 
 
+def parse_daily_assignments(reply_text: str, roster: list[dict]) -> dict[str, str]:
+    """Take the manager's free-form reply ('jonny: finish the report. hannah: continue.')
+    and return {worker_name: assignment_string}. Empty dict if the manager said
+    'all continue' / 'no changes' / similar. Failsafe: returns {} on error.
+    """
+    if not config.GOOGLE_API_KEY or not reply_text.strip():
+        return {}
+
+    worker_lines = []
+    for w in roster:
+        nicks = (w.get("nicknames") or [])
+        nick_str = f" (aka: {', '.join(nicks)})" if nicks else ""
+        worker_lines.append(f"- {w['name']}{nick_str}")
+    roster_block = "\n".join(worker_lines)
+
+    prompt = f"""You're parsing a manager's reply about what each worker should focus on.
+
+KNOWN WORKERS (match against these — use EXACT full names in output):
+{roster_block}
+
+MANAGER'S REPLY:
+{reply_text.strip()}
+
+Parse this into JSON:
+{{
+  "assignments": [
+    {{"worker_name": "<exact full name from the roster above>", "assignment": "<the task they should focus on, or 'continue' if the manager said to keep going>"}}
+  ]
+}}
+
+Rules:
+- Match nicknames/first names to the full roster name (e.g. "norks" → "Norlan Baluncio Burce")
+- If the manager said "all continue" / "everyone good" / "no changes" / similar → return {{"assignments": []}}
+- Only include workers the manager actually mentioned; omit unmentioned workers
+- For workers told to "continue" / "keep going" / "same as yesterday" → set assignment to exactly "continue"
+- For specific tasks, copy the manager's words verbatim (don't paraphrase)
+- Output ONLY the JSON. No prose.
+"""
+    try:
+        data = _gemini_json(prompt, max_tokens=1024)
+    except Exception as e:
+        log.warning("Failed to parse daily assignments: %s", e)
+        return {}
+
+    result: dict[str, str] = {}
+    for item in (data.get("assignments") or [])[:30]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("worker_name", "")).strip()
+        assignment = str(item.get("assignment", "")).strip()
+        if name and assignment:
+            result[name] = assignment
+    return result
+
+
 def generate_checkin_prompt(worker: dict, today_events: list[dict]) -> str | None:
     """Generate a contextual check-in DM that references the worker's recent
     activity. Returns None on failure so caller can fall back to generic prompt.

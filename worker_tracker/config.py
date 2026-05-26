@@ -116,6 +116,8 @@ FOLLOWUP_COOLDOWN_MINUTES = int(os.environ.get("FOLLOWUP_COOLDOWN_MINUTES", "60"
 WEEKLY_SYNTHESIS_DOW = int(os.environ.get("WEEKLY_SYNTHESIS_DOW", "6"))  # 0=Mon, 6=Sun
 WEEKLY_SYNTHESIS_TIME = os.environ.get("WEEKLY_SYNTHESIS_TIME", "21:00")
 
+# Daily planning config defined below the admin block (needs OWNER_SLACK_IDS).
+
 # Payroll
 PAYROLL_TAB = "Payroll"
 PAYROLL_HEADER = [
@@ -200,6 +202,14 @@ MANAGER_SLACK_IDS = [
 ]
 # Union used to gate admin-command routing in the bot.
 ADMIN_SLACK_IDS = list({*OWNER_SLACK_IDS, *MANAGER_SLACK_IDS})
+
+# Daily planning: Sam asks the manager what each worker should focus on tomorrow.
+# Fires every evening so the manager has time to think before workers log in.
+DAILY_PLANNING_TIME = os.environ.get("DAILY_PLANNING_TIME", "20:00")  # 8pm manager local
+# Slack ID of the person Sam asks. Defaults to first owner (Jan).
+DAILY_PLANNING_SLACK_ID = os.environ.get("DAILY_PLANNING_SLACK_ID") or (
+    OWNER_SLACK_IDS[0] if OWNER_SLACK_IDS else None
+)
 
 ADMIN_INTRODUCE_PATTERNS = (
     r"\bintroduce (?:everyone|all|workers?|the team)\b",

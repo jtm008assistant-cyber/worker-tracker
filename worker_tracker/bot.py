@@ -49,6 +49,10 @@ PENDING_FOLLOWUP: dict[str, dict] = {}
 FOLLOWUPS_TODAY: dict[str, dict] = {}
 LAST_FOLLOWUP_AT: dict[str, datetime] = {}
 
+# Manager is in this set after Sam DMs the daily planning question; cleared
+# once their reply is parsed and assignments are saved.
+PENDING_DAILY_PLANNING: set[str] = set()
+
 
 def reload_roster() -> None:
     workers = sheets.load_roster()
@@ -317,6 +321,11 @@ def handle_message(event, client) -> None:
     is_manager = user_id in config.MANAGER_SLACK_IDS
     is_admin = is_owner or is_manager
 
+    # Daily planning reply — fires only if this user was sent the planning question.
+    # Check BEFORE admin-command parsing so a free-form planning reply doesn't
+    # accidentally route through admin patterns. But check AFTER the admin-routing
+    # block so admin commands still work during the planning window — done below.
+
     if is_admin:
         # "what is X doing" / "status of X" / etc.
         m = _admin_status_re.search(text)
@@ -374,6 +383,11 @@ def handle_message(event, client) -> None:
                     log.exception("admin forward failed")
                     client.chat_postMessage(channel=user_id, text=f"failed to send: {e}")
                 return
+
+    # Planning reply — if we asked this person the planning question and they
+    # didn't match an admin command above, treat their message as the answer.
+    if _handle_planning_reply(user_id, text, client):
+        return
 
     # 'introduce everyone' — owners only (managers can't broadcast intros)
     if is_owner and _admin_intro_re.search(text):
@@ -562,13 +576,29 @@ def handle_message(event, client) -> None:
         if not sheets.load_profile(user_id):
             schedule_q = " btw, what's your usual schedule? roughly when do you start and wrap up most days?"
 
+        # If Jan sent a focus assignment for this worker last evening, relay it.
+        # Otherwise fall back to the open-ended "what's on your plate" question.
+        assignment = _latest_assignment_for(user_id)
+        if assignment and assignment.lower() not in ("continue",):
+            plate_q = (
+                f"\n\nJan asked you to focus on this today:\n> {assignment}\n\n"
+                f"message me when you start working on it."
+            )
+        elif assignment and assignment.lower() == "continue":
+            plate_q = (
+                f"\n\nJan said to continue what you were already working on. "
+                f"quick reminder of what that is so I can track it?"
+            )
+        else:
+            plate_q = "\n\nso what's on your plate today? give me a quick idea of what you're tackling."
+
         client.chat_postMessage(
             channel=user_id,
             text=(
                 f"hey {first}! got you in 🙌 I'll loop back every {cadence} to see "
                 f"how things are going. shoot me 'EOD' whenever you wrap up."
                 + view_intro
-                + f"\n\nso what's on your plate today? give me a quick idea of what you're tackling."
+                + plate_q
                 + schedule_q
             ),
         )
@@ -706,6 +736,109 @@ def schedule_daily_digest() -> None:
     log.info("Daily digest scheduled %s %s", config.REPORT_TIME_LOCAL, config.MANAGER_TZ)
 
 
+def send_daily_planning_question() -> None:
+    """DM the manager (Jan by default) asking what each worker should focus on tomorrow.
+    Their reply gets parsed by Gemini and saved as daily_assignment events; on the
+    next login, Sam relays the assignment to each worker.
+    """
+    if _app is None or not config.DAILY_PLANNING_SLACK_ID:
+        return
+    reload_roster()
+    workers = [w for w in WORKERS.values() if w["user_id"] not in config.OWNER_SLACK_IDS]
+    if not workers:
+        return
+
+    lines = [
+        "hey 👋 quick planning question for tomorrow's shifts.",
+        "",
+        "what should each worker focus on?",
+        "",
+    ]
+    for w in workers:
+        first = w["name"].split()[0]
+        lines.append(f"• *{first}* — ?")
+    lines.append("")
+    lines.append(
+        "reply with assignments per worker (e.g. \"jonny: finish the SKU audit. "
+        "hannah: continue. norks: review the new product photos.\"). "
+        "or just say *\"all continue\"* if nothing changes."
+    )
+
+    try:
+        _app.client.chat_postMessage(channel=config.DAILY_PLANNING_SLACK_ID, text="\n".join(lines))
+        PENDING_DAILY_PLANNING.add(config.DAILY_PLANNING_SLACK_ID)
+        log.info("Sent daily planning question to %s", config.DAILY_PLANNING_SLACK_ID)
+    except Exception:
+        log.exception("Failed to send daily planning question")
+
+
+def schedule_daily_planning() -> None:
+    if not config.DAILY_PLANNING_SLACK_ID:
+        return
+    hh, mm = map(int, config.DAILY_PLANNING_TIME.split(":"))
+    scheduler.add_job(
+        send_daily_planning_question, "cron",
+        hour=hh, minute=mm,
+        timezone=ZoneInfo(config.MANAGER_TZ),
+        id="daily_planning",
+    )
+    log.info("Daily planning question scheduled %s %s", config.DAILY_PLANNING_TIME, config.MANAGER_TZ)
+
+
+def _handle_planning_reply(user_id: str, text: str, client) -> bool:
+    """If `user_id` was sent a planning question and this looks like their reply,
+    parse it via Gemini and save per-worker daily_assignment events.
+    Returns True if handled (caller should return early)."""
+    if user_id not in PENDING_DAILY_PLANNING:
+        return False
+    # Heuristic: if message is suspiciously short (one word), probably not the planning answer
+    if len(text.strip()) < 3:
+        return False
+
+    reload_roster()
+    roster = list(WORKERS.values())
+    assignments = analyzer.parse_daily_assignments(text, roster)
+    PENDING_DAILY_PLANNING.discard(user_id)
+
+    if not assignments:
+        # 'all continue' or unparseable — acknowledge and move on
+        try:
+            client.chat_postMessage(channel=user_id, text="got it — keeping everyone on their current work 👍")
+        except Exception:
+            pass
+        return True
+
+    # Save per worker
+    saved = []
+    for w in roster:
+        if w["name"] in assignments:
+            asg = assignments[w["name"]]
+            sheets.append_event(w["name"], w["user_id"], "daily_assignment", asg, w["tz"])
+            saved.append(f"{w['name'].split()[0]}: {asg[:60]}")
+
+    try:
+        body = "saved 🙌 here's what i'll relay to each worker on their next login:\n\n" + \
+               "\n".join(f"• {s}" for s in saved)
+        client.chat_postMessage(channel=user_id, text=body)
+    except Exception:
+        pass
+    return True
+
+
+def _latest_assignment_for(user_id: str) -> str | None:
+    """Look up the most recent daily_assignment for this worker (last 36 hours).
+    Returns the assignment text, or None."""
+    try:
+        rows = sheets.activity_since(2, slack_user_id=user_id)
+    except Exception:
+        return None
+    asgs = [r for r in rows if r.get("Type") == "daily_assignment"]
+    if not asgs:
+        return None
+    asgs.sort(key=lambda r: r.get("Timestamp UTC", ""))
+    return asgs[-1].get("Message", "").strip() or None
+
+
 def send_pre_payroll_review_dms() -> None:
     """DM every active worker their current pay-period totals, asking them to
     flag any discrepancies before payroll runs tomorrow. Fired the evening
@@ -817,6 +950,7 @@ def main() -> None:
     schedule_weekly_synthesis()
     schedule_payroll()
     schedule_pre_payroll_reviews()
+    schedule_daily_planning()
     log.info("Starting Socket Mode handler. Ctrl-C to stop.")
     SocketModeHandler(_app, config.SLACK_APP_TOKEN).start()
 
