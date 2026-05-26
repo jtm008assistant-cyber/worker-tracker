@@ -416,6 +416,135 @@ Rules:
     return cleaned
 
 
+def parse_time_off_log(text: str, roster: list[dict], today_iso: str) -> dict | None:
+    """Parse 'log vacation for hannah dec 1-5' / 'sick day for rey today' / etc.
+    Returns dict with worker_name, type, start_date, end_date, days, notes — or None.
+    """
+    if not config.GOOGLE_API_KEY or not text.strip():
+        return None
+
+    worker_lines = []
+    for w in roster:
+        nicks = (w.get("nicknames") or [])
+        nick_str = f" (aka: {', '.join(nicks)})" if nicks else ""
+        worker_lines.append(f"- {w['name']}{nick_str}")
+    roster_block = "\n".join(worker_lines)
+
+    prompt = f"""Parse a manager's time-off log entry into structured data.
+
+KNOWN WORKERS (match against these — use EXACT full names):
+{roster_block}
+
+TODAY'S DATE: {today_iso}
+
+THE LOG ENTRY:
+{text.strip()}
+
+Output JSON only:
+{{
+  "worker_name": "<exact full name from roster, or empty string if no match>",
+  "type": "vacation | sick | pto | personal | unpaid | holiday",
+  "start_date": "YYYY-MM-DD",
+  "end_date": "YYYY-MM-DD",
+  "days": <integer count of weekdays, treating start and end inclusive>,
+  "notes": "<any extra context from the message, or empty>"
+}}
+
+Rules:
+- Match nicknames/first names to full roster name
+- "today" → today's date. "tomorrow" → tomorrow's date.
+- "this friday" → the upcoming Friday from today's date.
+- "dec 15-20" → start=2026-12-15 end=2026-12-20 (or whatever year makes sense — usually current or next)
+- Single-day entry: start_date == end_date
+- "days" = number of WEEKDAYS in the range (skip weekends unless explicitly stated as weekend days)
+- If you can't parse cleanly, return all-empty fields; the caller will handle it
+- Output ONLY the JSON.
+"""
+    try:
+        data = _gemini_json(prompt, max_tokens=512)
+    except Exception as e:
+        log.warning("Time off parse failed: %s", e)
+        return None
+
+    name = str(data.get("worker_name", "")).strip()
+    if not name:
+        return None
+    return {
+        "worker_name": name,
+        "type": str(data.get("type", "vacation")).strip().lower(),
+        "start_date": str(data.get("start_date", "")).strip(),
+        "end_date": str(data.get("end_date", "")).strip(),
+        "days": int(data.get("days", 1) or 1),
+        "notes": str(data.get("notes", "")).strip(),
+    }
+
+
+def parse_benefits_reply(text: str, roster: list[dict]) -> dict[str, dict]:
+    """Parse a benefits-info reply like 'jonny gets 10 vacation 5 sick. hannah: 15/10. rey 8 vac.'
+    Returns {worker_name: {vacation_days, sick_days, pto_days, notes}}.
+    """
+    if not config.GOOGLE_API_KEY or not text.strip():
+        return {}
+
+    worker_lines = []
+    for w in roster:
+        nicks = (w.get("nicknames") or [])
+        nick_str = f" (aka: {', '.join(nicks)})" if nicks else ""
+        worker_lines.append(f"- {w['name']}{nick_str}")
+    roster_block = "\n".join(worker_lines)
+
+    prompt = f"""A manager replied with each worker's benefit allocations.
+Parse it into structured data per worker.
+
+KNOWN WORKERS (match against these — use EXACT full names):
+{roster_block}
+
+THE MANAGER'S REPLY:
+{text.strip()}
+
+Output JSON only:
+{{
+  "workers": [
+    {{
+      "worker_name": "<exact full name>",
+      "vacation_days": <int per year>,
+      "sick_days": <int per year>,
+      "pto_days": <int per year — leave 0 if vacation+sick are tracked separately>,
+      "notes": "<any extra context like 'rolls over', 'unlimited PTO', etc., or empty>"
+    }}
+  ]
+}}
+
+Rules:
+- Match nicknames/first names to full roster name
+- If a number isn't given for a benefit, set it to 0
+- "unlimited" → set days to 0 and note "unlimited" in notes
+- "no benefits" / "contractor" → all zeros, note "contractor — no PTO benefits"
+- Only include workers the manager mentioned
+- Output ONLY the JSON.
+"""
+    try:
+        data = _gemini_json(prompt, max_tokens=2048)
+    except Exception as e:
+        log.warning("Benefits parse failed: %s", e)
+        return {}
+
+    result: dict[str, dict] = {}
+    for item in (data.get("workers") or [])[:30]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("worker_name", "")).strip()
+        if not name:
+            continue
+        result[name] = {
+            "vacation_days": int(item.get("vacation_days", 0) or 0),
+            "sick_days": int(item.get("sick_days", 0) or 0),
+            "pto_days": int(item.get("pto_days", 0) or 0),
+            "notes": str(item.get("notes", "")).strip(),
+        }
+    return result
+
+
 def parse_daily_assignments(reply_text: str, roster: list[dict]) -> dict[str, str]:
     """Take the manager's free-form reply ('jonny: finish the report. hannah: continue.')
     and return {worker_name: assignment_string}. Empty dict if the manager said

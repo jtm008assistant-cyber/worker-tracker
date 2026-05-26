@@ -71,6 +71,7 @@ ACTIVITY_TAB = "Activity Log"
 SUMMARY_TAB = "Daily Summary"
 PROFILE_TAB = "Worker Profile"
 KNOWLEDGE_TAB = "Processes & Tools"
+TIME_OFF_TAB = "Time Off"
 LIBRARY_TAB = "Knowledge Library"
 
 ROSTER_HEADER = [
@@ -79,6 +80,7 @@ ROSTER_HEADER = [
     "Pay Type", "Hourly Rate", "Salary (per period)", "Currency",
     "Overtime Threshold (h/wk)", "Overtime Multiplier",
     "Check-in Frequency (min)", "Personal View Sheet URL", "Nicknames",
+    "Vacation Days/Year", "Sick Days/Year", "PTO Days/Year", "Benefits Notes",
 ]
 ACTIVITY_HEADER = ["Timestamp UTC", "Local Date", "Local Time", "Worker", "Slack User ID", "Type", "Message"]
 SUMMARY_HEADER = [
@@ -99,6 +101,12 @@ KNOWLEDGE_HEADER = [
     "Worker", "Slack User ID", "Kind", "Name", "URL",
     "Description", "Steps / Notes",
     "First Mentioned", "Last Updated", "Times Referenced",
+]
+
+TIME_OFF_HEADER = [
+    "Date Logged", "Worker", "Slack User ID", "Type",
+    "Start Date", "End Date", "Days",
+    "Status", "Logged By", "Notes",
 ]
 
 # Aggregated company-wide view, one row per unique tool/process across all workers.
@@ -216,6 +224,27 @@ ADMIN_INTRODUCE_PATTERNS = (
     r"\bsend intros?\b",
     r"\bonboard (?:everyone|all|workers?|the team)\b",
     r"\bintro all\b",
+)
+
+# Admin command: "log vacation for hannah dec 1-5" / "sick day for rey today" / etc.
+ADMIN_TIME_OFF_PATTERNS = (
+    r"\blog (?:a |the )?(?:vacation|sick|pto|personal|time off|holiday|day off|leave)\b",
+    r"\b(?:vacation|sick|pto|personal|holiday|leave|day off|time off)\s+for\b",
+    r"\b(?:gave|giving|approving)\s+\w+\s+(?:a |the )?(?:day|days)\s+off\b",
+)
+
+# Admin command: "ask hannah about benefits" / "collect benefits" / etc.
+ADMIN_BENEFITS_QUERY_PATTERNS = (
+    r"\bask\s+\w+\s+about\s+benefits\b",
+    r"\bcollect\s+benefits\b",
+    r"\bget\s+benefits\s+info\b",
+)
+
+# Worker query: "how many vacation days do i have" / "pto balance" / etc.
+TIMEOFF_BALANCE_QUERY_PATTERNS = (
+    r"\bhow many\s+(?:vacation|sick|pto|personal)\s+(?:days?)?\b",
+    r"\b(?:my )?(?:vacation|sick|pto)\s+balance\b",
+    r"\bdays off\s+(?:left|remaining|available)\b",
 )
 
 # Admin can relay a message THROUGH Sam to a specific worker. Examples:

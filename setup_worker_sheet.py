@@ -144,6 +144,11 @@ def main() -> None:
     knowledge.update(values=[wt.KNOWLEDGE_HEADER], range_name="A1", value_input_option="USER_ENTERED")
     _format_header(knowledge, wt.KNOWLEDGE_HEADER)
 
+    # Time Off tracker
+    timeoff = ss.add_worksheet(title=wt.TIME_OFF_TAB, rows=500, cols=len(wt.TIME_OFF_HEADER))
+    timeoff.update(values=[wt.TIME_OFF_HEADER], range_name="A1", value_input_option="USER_ENTERED")
+    _format_header(timeoff, wt.TIME_OFF_HEADER)
+
     # ---------------- PAYROLL SHEET (separate) ----------------
     payroll_id, ps = _create_sheet(drive, gc, args.payroll_title, folder_id, args.email)
     payroll_ws = ps.sheet1

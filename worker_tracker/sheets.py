@@ -113,8 +113,40 @@ def load_roster() -> List[dict]:
             "nicknames": [
                 n.strip().lower() for n in str(r.get("Nicknames", "")).split(",") if n.strip()
             ],
+            "vacation_days_year": _f("Vacation Days/Year"),
+            "sick_days_year": _f("Sick Days/Year"),
+            "pto_days_year": _f("PTO Days/Year"),
+            "benefits_notes": str(r.get("Benefits Notes", "")).strip(),
         })
     return workers
+
+
+def append_time_off(row: List) -> None:
+    """Append a row to the Time Off tab on the tracker sheet."""
+    ws = open_tracker().worksheet(config.TIME_OFF_TAB)
+    ws.append_row(row, value_input_option="USER_ENTERED")
+
+
+def time_off_for_worker(slack_user_id: str, year: int | None = None) -> list[dict]:
+    """Return all Time Off rows for one worker (optionally filtered to a specific year by Start Date)."""
+    try:
+        ws = open_tracker().worksheet(config.TIME_OFF_TAB)
+    except Exception:
+        return []
+    rows = ws.get_all_records()
+    out = []
+    for r in rows:
+        if str(r.get("Slack User ID", "")).strip() != slack_user_id:
+            continue
+        if year:
+            try:
+                start = str(r.get("Start Date", ""))
+                if start and not start.startswith(str(year)):
+                    continue
+            except Exception:
+                pass
+        out.append(r)
+    return out
 
 
 def append_timesheet(row: List) -> None:

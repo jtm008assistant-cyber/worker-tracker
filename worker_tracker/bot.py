@@ -32,6 +32,9 @@ _hours_query_re = re.compile("|".join(config.HOURS_QUERY_PATTERNS), re.IGNORECAS
 _discrepancy_re = re.compile("|".join(config.DISCREPANCY_PATTERNS), re.IGNORECASE)
 _admin_intro_re = re.compile("|".join(config.ADMIN_INTRODUCE_PATTERNS), re.IGNORECASE)
 _admin_status_re = re.compile("|".join(config.ADMIN_STATUS_PATTERNS), re.IGNORECASE)
+_admin_time_off_re = re.compile("|".join(config.ADMIN_TIME_OFF_PATTERNS), re.IGNORECASE)
+_admin_benefits_query_re = re.compile("|".join(config.ADMIN_BENEFITS_QUERY_PATTERNS), re.IGNORECASE)
+_timeoff_balance_query_re = re.compile("|".join(config.TIMEOFF_BALANCE_QUERY_PATTERNS), re.IGNORECASE)
 _admin_forward_re = re.compile("|".join(config.ADMIN_FORWARD_PATTERNS), re.IGNORECASE | re.DOTALL)
 
 scheduler = BackgroundScheduler()
@@ -52,6 +55,10 @@ LAST_FOLLOWUP_AT: dict[str, datetime] = {}
 # Manager is in this set after Sam DMs the daily planning question; cleared
 # once their reply is parsed and assignments are saved.
 PENDING_DAILY_PLANNING: set[str] = set()
+
+# Hannah (or whoever) is in this set after Sam DMs the benefits collection
+# question; cleared once their reply is parsed and benefits saved to Roster.
+PENDING_BENEFITS_REPLY: set[str] = set()
 
 
 def reload_roster() -> None:
@@ -413,6 +420,25 @@ def handle_message(event, client) -> None:
     # Planning reply — if we asked this person the planning question and they
     # didn't match an admin command above, treat their message as the answer.
     if _handle_planning_reply(user_id, text, client):
+        return
+
+    # Benefits reply — if Sam asked this person about worker benefits, parse it.
+    if _handle_benefits_reply(user_id, text, client):
+        return
+
+    # Admin command: log time off ("vacation for hannah dec 1-5", etc.)
+    if is_admin and _admin_time_off_re.search(text):
+        _handle_log_time_off(user_id, text, client, worker)
+        return
+
+    # Admin command: ask Hannah (or named manager) about benefits
+    if is_owner and _admin_benefits_query_re.search(text):
+        _handle_benefits_collection_request(user_id, text, client)
+        return
+
+    # Worker query: balance check (vacation/sick/pto days left)
+    if _timeoff_balance_query_re.search(text):
+        _handle_balance_query(user_id, client, worker)
         return
 
     # 'introduce everyone' — owners only (managers can't broadcast intros)
@@ -824,6 +850,194 @@ def _handle_planning_reply(user_id: str, text: str, client) -> bool:
     except Exception:
         pass
     return True
+
+
+def _handle_log_time_off(admin_user_id: str, text: str, client, worker: dict) -> None:
+    """Admin says 'log vacation for hannah dec 1-5' — parse, write to Time Off tab, ack."""
+    reload_roster()
+    roster = list(WORKERS.values())
+    from datetime import datetime as _dt
+    today_iso = _dt.now(ZoneInfo(config.MANAGER_TZ)).date().isoformat()
+    parsed = analyzer.parse_time_off_log(text, roster, today_iso)
+    if not parsed or not parsed.get("worker_name"):
+        _dm(client, admin_user_id,
+            "couldn't parse that — try something like \"log vacation for hannah dec 1-5\" or "
+            "\"sick day for rey today\"",
+            event_type="sam_time_off_parse_failed")
+        return
+
+    # Find the target worker dict for their Slack ID
+    target = next((w for w in roster if w["name"] == parsed["worker_name"]), None)
+    if not target:
+        _dm(client, admin_user_id,
+            f"i couldn't match \"{parsed['worker_name']}\" to anyone on the roster",
+            event_type="sam_time_off_no_match")
+        return
+
+    sheets.append_time_off([
+        _dt.now(timezone.utc).isoformat(timespec="seconds"),
+        target["name"], target["user_id"],
+        parsed["type"],
+        parsed["start_date"], parsed["end_date"],
+        parsed["days"],
+        "approved",  # admin-logged entries are pre-approved
+        worker["name"],  # logged by
+        parsed["notes"],
+    ])
+    summary = (f"logged: {target['name'].split()[0]} — {parsed['type']} "
+               f"{parsed['start_date']}"
+               + (f" → {parsed['end_date']}" if parsed['end_date'] != parsed['start_date'] else "")
+               + f" ({parsed['days']} days)")
+    _dm(client, admin_user_id, f"✓ {summary}", event_type="sam_time_off_logged")
+    # Optional: notify the worker
+    try:
+        first = target["name"].split()[0]
+        _dm(client, target["user_id"],
+            f"heads up {first} — Jan logged {parsed['days']} day(s) of {parsed['type']} for you "
+            f"({parsed['start_date']}"
+            + (f" → {parsed['end_date']}" if parsed['end_date'] != parsed['start_date'] else "")
+            + "). all approved. enjoy 🙌",
+            event_type="sam_time_off_notify")
+    except Exception:
+        log.exception("Failed to notify worker about logged time off")
+
+
+def _handle_benefits_collection_request(admin_user_id: str, text: str, client) -> None:
+    """Admin says 'ask hannah about benefits' — DM Hannah the collection question."""
+    # Find Hannah specifically (manager) — or fall back to the first manager on the roster
+    reload_roster()
+    target = None
+    # Look for a manager (Hannah by default)
+    for uid in config.MANAGER_SLACK_IDS:
+        w = WORKERS.get(uid)
+        if w:
+            target = w
+            break
+    if not target:
+        _dm(client, admin_user_id,
+            "no manager on the roster to ask. add someone to MANAGER_SLACK_IDS first.",
+            event_type="sam_no_manager")
+        return
+
+    # Build the question with each worker name
+    workers = [w for w in WORKERS.values() if w["user_id"] not in config.OWNER_SLACK_IDS
+               and w["user_id"] != target["user_id"]]
+    lines = [
+        f"hey {target['name'].split()[0]} 👋 Jan asked me to collect benefits info on the team.",
+        "",
+        "for each of these workers, what's their annual allocation?",
+        "(vacation days, sick days, PTO days — or 'unlimited', or 'contractor — no benefits')",
+        "",
+    ]
+    for w in workers:
+        lines.append(f"• *{w['name'].split()[0]}*")
+    lines.append("")
+    lines.append("reply however's easiest — e.g. \"jonny: 10 vacation 5 sick. hannah: 15/10. "
+                 "rey: contractor, no PTO. ger: 10/5. janina: 10/5. norks: 10/5.\"")
+    if _dm(client, target["user_id"], "\n".join(lines), event_type="sam_benefits_question"):
+        PENDING_BENEFITS_REPLY.add(target["user_id"])
+        _dm(client, admin_user_id,
+            f"sent the benefits collection question to {target['name'].split()[0]}. "
+            f"i'll save what they tell me to the Roster + ping you when done.",
+            event_type="sam_benefits_request_ack")
+
+
+def _handle_benefits_reply(user_id: str, text: str, client) -> bool:
+    """If user_id was sent the benefits question, parse and save to Roster."""
+    if user_id not in PENDING_BENEFITS_REPLY:
+        return False
+    if len(text.strip()) < 5:
+        return False
+
+    reload_roster()
+    roster = list(WORKERS.values())
+    parsed = analyzer.parse_benefits_reply(text, roster)
+    PENDING_BENEFITS_REPLY.discard(user_id)
+
+    if not parsed:
+        _dm(client, user_id,
+            "couldn't quite parse that — could you try again with format like "
+            "\"jonny: 10 vacation 5 sick. hannah: 15/10. rey: contractor.\"",
+            event_type="sam_benefits_parse_failed")
+        PENDING_BENEFITS_REPLY.add(user_id)  # re-add so they can try again
+        return True
+
+    # Write back to Roster
+    ws = sheets.open_tracker().worksheet(config.ROSTER_TAB)
+    rows = ws.get_all_values()
+    header = rows[0]
+    name_col = header.index("Name") + 1
+    vac_col = header.index("Vacation Days/Year") + 1
+    sick_col = header.index("Sick Days/Year") + 1
+    pto_col = header.index("PTO Days/Year") + 1
+    notes_col = header.index("Benefits Notes") + 1
+
+    saved = []
+    for i, r in enumerate(rows[1:], start=2):
+        if len(r) < name_col:
+            continue
+        name = r[name_col - 1].strip()
+        if name in parsed:
+            b = parsed[name]
+            ws.update_cell(i, vac_col, b["vacation_days"])
+            ws.update_cell(i, sick_col, b["sick_days"])
+            ws.update_cell(i, pto_col, b["pto_days"])
+            ws.update_cell(i, notes_col, b["notes"])
+            saved.append(f"{name.split()[0]}: {b['vacation_days']}v/{b['sick_days']}s/{b['pto_days']}p")
+
+    _dm(client, user_id,
+        "saved 🙌 here's what i recorded:\n\n" + "\n".join(f"• {s}" for s in saved) +
+        "\n\nthanks — I'll use this when workers ask about their balance.",
+        event_type="sam_benefits_saved")
+
+    # Notify Jan
+    if config.OWNER_SLACK_IDS:
+        try:
+            _dm(client, config.OWNER_SLACK_IDS[0],
+                "FYI — benefits info just landed from Hannah:\n\n" + "\n".join(f"• {s}" for s in saved),
+                event_type="sam_benefits_collected_notify")
+        except Exception:
+            pass
+    return True
+
+
+def _handle_balance_query(user_id: str, client, worker: dict) -> None:
+    """Worker asks 'how many vacation days do i have left' — calc from Roster + Time Off."""
+    from datetime import datetime as _dt
+    year = _dt.now(ZoneInfo(worker.get("tz") or "UTC")).year
+    first = worker["name"].split()[0]
+    allocations = {
+        "vacation": int(worker.get("vacation_days_year") or 0),
+        "sick": int(worker.get("sick_days_year") or 0),
+        "pto": int(worker.get("pto_days_year") or 0),
+    }
+    if sum(allocations.values()) == 0 and not (worker.get("benefits_notes") or "").strip():
+        _dm(client, user_id,
+            f"hey {first} — I don't have your benefits info on file yet. Jan or Hannah "
+            f"will set that up soon. for now you can still request time off and they'll handle it.",
+            event_type="sam_balance_unknown")
+        return
+
+    used = {"vacation": 0, "sick": 0, "pto": 0, "personal": 0, "unpaid": 0, "holiday": 0}
+    for r in sheets.time_off_for_worker(user_id, year=year):
+        t = (r.get("Type") or "").strip().lower()
+        if t in used:
+            try:
+                used[t] += int(r.get("Days") or 0)
+            except (TypeError, ValueError):
+                pass
+
+    notes = worker.get("benefits_notes") or ""
+    lines = [f"hey {first}, here's your {year} balance:"]
+    for kind in ("vacation", "sick", "pto"):
+        alloc = allocations.get(kind, 0)
+        u = used.get(kind, 0)
+        if alloc or u:
+            lines.append(f"• *{kind}*: {alloc - u} left ({u} used of {alloc})")
+    if notes:
+        lines.append(f"\n_note: {notes}_")
+    lines.append("\nlet me know if you want to request time off and I'll route it to Jan.")
+    _dm(client, user_id, "\n".join(lines), event_type="sam_balance_reply")
 
 
 def _latest_assignment_for(user_id: str) -> str | None:
