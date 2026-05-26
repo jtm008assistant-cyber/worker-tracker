@@ -22,7 +22,7 @@ from google import genai
 from google.genai import types
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from . import config
+from . import config, deep_brain
 
 log = logging.getLogger(__name__)
 
@@ -81,11 +81,51 @@ def _profile_context_block(profile: dict | None) -> str:
     return "\n".join(lines) if len(lines) > 1 else "PRIOR PROFILE: (empty — first analysis)"
 
 
-def _build_daily_prompt(name: str, login_local: str, eod_local: str, active_hours: float,
-                        help_count: int, missed: int,
-                        checkins: Iterable[tuple[datetime, str]],
-                        profile: dict | None,
-                        knowledge: list[dict] | None = None) -> str:
+_DAILY_SYSTEM_PROMPT = """You are an AI ops/HR analyst for a small team at Hey Girl Tea. Your
+job is to audit each worker's day to help the manager spot two things:
+
+1. Tasks that could be AUTOMATED (specific scripts, no-code tools, AI
+   prompts, integrations).
+2. MANUAL or repetitive grunt-work that's eating their time.
+
+You have history about each worker. Use it. If their prior profile already
+flagged an automation opportunity and they're doing the same manual task
+AGAIN today, call that out explicitly ("REPEAT: X was flagged before and
+they're still doing it manually").
+
+Reasoning approach:
+- Read the worker's prior profile and known tools/processes first
+- Then read today's check-ins carefully
+- Cross-reference: are they describing tasks that match patterns from their
+  open automation backlog? Are they using tools you already know about, or
+  new ones? Are their replies getting vaguer over the day (slack signal)?
+- Capacity signal calibration:
+    * spare capacity = short answers, light workload, finished early
+    * stretched     = lots of work, long replies, time pressure
+    * stuck         = explicit help/blocker signals
+    * balanced      = none of the above signals dominate
+
+Output schema — JSON ONLY, matching this shape exactly:
+{
+  "day_summary": "2-3 sentences plain English: what they actually did today, referencing prior-profile patterns where relevant",
+  "automation_opportunities": ["concrete bullet ≤25 words; if repeating a prior flag, prefix with 'REPEAT: '", ...],
+  "manual_red_flags": ["concrete bullet ≤25 words pointing at manual/repetitive work", ...],
+  "capacity_signal": "one of: spare capacity | balanced | stretched | stuck"
+}
+
+Rules:
+- Max 5 items per list. Empty list if nothing genuine — do NOT pad with vague suggestions.
+- Each bullet must reference something the worker actually did or said today.
+- Be specific: "write a Python script to import LinkedIn export into HubSpot via API" beats "automate data entry".
+- Output ONLY the JSON. No prose before or after. No code fences."""
+
+
+def _build_daily_user_block(name: str, login_local: str, eod_local: str, active_hours: float,
+                            help_count: int, missed: int,
+                            checkins: Iterable[tuple[datetime, str]],
+                            profile: dict | None,
+                            knowledge: list[dict] | None = None) -> str:
+    """The variable per-worker context — comes AFTER the cached system prompt."""
     lines = [
         f"[{t.strftime('%H:%M')}] {m.strip() or '(empty reply)'}"
         for t, m in checkins
@@ -93,17 +133,7 @@ def _build_daily_prompt(name: str, login_local: str, eod_local: str, active_hour
     checkin_block = "\n".join(lines) if lines else "(no check-in replies recorded)"
     profile_block = _profile_context_block(profile)
     knowledge_block = _knowledge_block(knowledge or [])
-    return f"""You are this worker's AI ops/HR analyst. You audit their day to help the
-manager spot two things:
-1. Tasks that could be AUTOMATED (specific scripts, no-code tools, AI prompts, integrations).
-2. MANUAL or repetitive grunt-work that's eating their time.
-
-You have history. Use it. If the prior profile already flagged an
-automation opportunity and the worker is doing the same manual task
-AGAIN today, call that out explicitly ("repeat: X was flagged on
-{{date}} and they're still doing it manually").
-
-{profile_block}
+    return f"""{profile_block}
 
 {knowledge_block}
 
@@ -113,21 +143,7 @@ Login (local): {login_local}    EOD: {eod_local}    Active: {active_hours}h
 Help requests today: {help_count}    Missed prompts: {missed}
 
 Check-in replies (chronological):
-{checkin_block}
-
-Respond as JSON ONLY:
-{{
-  "day_summary": "2-3 sentences: what they actually did today, referencing patterns from prior profile if relevant",
-  "automation_opportunities": ["concrete bullet ≤25 words; if repeating a prior flag, prefix with 'REPEAT: '", ...],
-  "manual_red_flags": ["concrete bullet ≤25 words pointing at manual/repetitive work", ...],
-  "capacity_signal": "one of: spare capacity | balanced | stretched | stuck"
-}}
-
-Rules:
-- Max 5 items per list. Empty list if nothing genuine.
-- Each bullet must reference something they actually did/said today.
-- Output ONLY the JSON. No prose before or after.
-"""
+{checkin_block}"""
 
 
 def analyze(name: str, login_local: str, eod_local: str, active_hours: float,
@@ -142,11 +158,12 @@ def analyze(name: str, login_local: str, eod_local: str, active_hours: float,
     if not checkins:
         return dict(EMPTY_DAILY)
     try:
-        data = _gemini_json(_build_daily_prompt(
+        user_block = _build_daily_user_block(
             name, login_local, eod_local, active_hours, help_count, missed, checkins, profile, knowledge,
-        ))
+        )
+        data = deep_brain.deep_json(_DAILY_SYSTEM_PROMPT, user_block, max_tokens=4000)
     except Exception as e:
-        log.warning("Gemini daily analysis failed for %s: %s", name, e)
+        log.warning("Deep-brain daily analysis failed for %s: %s", name, e)
         return dict(EMPTY_DAILY)
 
     out = dict(EMPTY_DAILY)
@@ -161,9 +178,55 @@ def analyze(name: str, login_local: str, eod_local: str, active_hours: float,
     return out
 
 
-def _build_weekly_prompt(name: str, prior_profile: dict | None,
-                         recent_summaries: list[dict],
-                         recent_activity: list[dict]) -> str:
+_WEEKLY_SYSTEM_PROMPT = """You are an AI ops/HR analyst doing the WEEKLY profile update for one
+worker on a small team. Your job: turn the past week of activity into a
+durable picture of who this worker is, what they actually do, what they're
+good at, what slows them down, and what work could be automated.
+
+You will read:
+1. The prior profile (last week's snapshot — may be empty if this is week 1)
+2. This week's daily summaries
+3. This week's raw check-in messages
+
+Then output a REPLACEMENT profile. Carry forward anything from the prior
+profile that still seems true, REVISE anything contradicted by this week,
+and ADD anything new. Be specific and concrete — no consultant-speak.
+
+Critical: for "automation_opportunities_open", carry forward unshipped items
+from the prior profile UNLESS the worker clearly addressed them this week.
+If they're STILL doing a task you flagged 2+ weeks ago, that's worth noting
+explicitly with a "[N weeks open]" prefix. For "automation_opportunities_shipped",
+add any that were addressed.
+
+Reasoning approach:
+- First skim the daily summaries to get the shape of the week
+- Then read the raw check-ins for texture (what they actually said)
+- Compare against the prior profile — what's confirmed, what's contradicted, what's new
+- For each list field, pull from concrete evidence in the data, not guesses
+
+Output schema — JSON ONLY, matching this shape exactly:
+{
+  "role_what_they_do": "1-2 sentences plain English: what their actual day-to-day work is",
+  "recurring_tasks": ["bullet ≤20 words", ...],
+  "known_strengths": ["bullet ≤20 words", ...],
+  "known_blockers": ["bullet ≤20 words", ...],
+  "tools_currently_used": ["tool name, brief context", ...],
+  "automation_opportunities_open": ["concrete proposal ≤25 words; if carried over, prefix '[N weeks open] '", ...],
+  "automation_opportunities_shipped": ["what got automated and roughly when", ...],
+  "productivity_patterns": ["bullet ≤25 words: time-of-day, day-of-week, energy patterns", ...],
+  "coaching_notes_for_manager": ["bullet ≤30 words: what manager should know, ask about, or coach on", ...]
+}
+
+Rules:
+- Lists max 8 items each. Empty list OK.
+- Pull evidence from THIS WEEK; do not invent.
+- Output ONLY the JSON. No prose before or after. No code fences."""
+
+
+def _build_weekly_user_block(name: str, prior_profile: dict | None,
+                             recent_summaries: list[dict],
+                             recent_activity: list[dict]) -> str:
+    """Variable per-worker context for the weekly synth — comes AFTER the cached system prompt."""
     prior_block = _profile_context_block(prior_profile)
     summary_lines = []
     for s in recent_summaries:
@@ -184,27 +247,7 @@ def _build_weekly_prompt(name: str, prior_profile: dict | None,
             raw_lines.append(f"  [{r.get('Local Date')} {r.get('Local Time')}] {t}: {r.get('Message', '')}")
     raw_block = "\n".join(raw_lines) if raw_lines else "(no raw activity)"
 
-    return f"""You are this worker's AI ops/HR analyst. You are doing the WEEKLY profile
-update. Your job: turn the past week of activity into a durable picture of
-who this worker is, what they actually do, what they're good at, what
-slows them down, and what work could be automated.
-
-You will read:
-1. The prior profile (last week's snapshot — may be empty if this is week 1)
-2. This week's daily summaries
-3. This week's raw check-in messages
-
-Then output a REPLACEMENT profile. Carry forward anything from the prior
-profile that still seems true, REVISE anything contradicted by this week,
-and ADD anything new. Be specific and concrete — no consultant-speak.
-
-Critical: for "Automation Opportunities (Open)", carry forward unshipped
-items from the prior profile UNLESS the worker clearly addressed them
-this week. If they're STILL doing a task you flagged 2+ weeks ago, that's
-worth noting explicitly. For "Automation Opportunities (Shipped)", add
-any that were addressed.
-
-WORKER: {name}
+    return f"""WORKER: {name}
 
 {prior_block}
 
@@ -212,26 +255,7 @@ DAILY SUMMARIES THIS WEEK:
 {summary_block}
 
 RAW CHECK-INS THIS WEEK:
-{raw_block}
-
-Respond as JSON ONLY, matching this schema exactly:
-{{
-  "role_what_they_do": "1-2 sentences plain English: what their actual day-to-day work is",
-  "recurring_tasks": ["bullet ≤20 words", ...],
-  "known_strengths": ["bullet ≤20 words", ...],
-  "known_blockers": ["bullet ≤20 words", ...],
-  "tools_currently_used": ["tool name, brief context", ...],
-  "automation_opportunities_open": ["concrete proposal ≤25 words; if carried over, prefix '[N weeks open] '", ...],
-  "automation_opportunities_shipped": ["what got automated and roughly when", ...],
-  "productivity_patterns": ["bullet ≤25 words: time-of-day, day-of-week, energy patterns, etc.", ...],
-  "coaching_notes_for_manager": ["bullet ≤30 words: what manager should know, ask about, or coach on", ...]
-}}
-
-Rules:
-- Lists max 8 items each. Empty list ok.
-- Pull evidence from THIS WEEK; do not invent.
-- Output ONLY the JSON.
-"""
+{raw_block}"""
 
 
 def _knowledge_block(knowledge: list[dict]) -> str:
@@ -605,12 +629,10 @@ def synthesize_weekly_profile(name: str, slack_user_id: str, first_seen: str,
         return fallback
 
     try:
-        data = _gemini_json(
-            _build_weekly_prompt(name, prior_profile, recent_summaries, recent_activity),
-            max_tokens=4096,
-        )
+        user_block = _build_weekly_user_block(name, prior_profile, recent_summaries, recent_activity)
+        data = deep_brain.deep_json(_WEEKLY_SYSTEM_PROMPT, user_block, max_tokens=6000)
     except Exception as e:
-        log.warning("Weekly synthesis failed for %s: %s", name, e)
+        log.warning("Deep-brain weekly synthesis failed for %s: %s", name, e)
         return fallback
 
     def bullets(key: str) -> str:

@@ -55,6 +55,11 @@ MISSED_CHECKIN_GRACE_MINUTES = int(os.environ.get("MISSED_CHECKIN_GRACE_MINUTES"
 
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+# Deep analytical brain — used for daily EOD analysis + weekly profile synthesis.
+# Falls back to Gemini Pro if ANTHROPIC_API_KEY isn't set, so nothing breaks
+# while you provision the Anthropic key.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6")
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
