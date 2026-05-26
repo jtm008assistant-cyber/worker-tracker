@@ -231,6 +231,32 @@ def _format_worker_status(worker: dict) -> str:
     )
 
 
+def _dm(client, user_id: str, text: str, event_type: str = "sam_reply") -> bool:
+    """Send a Slack DM AND log it to Activity Log. Single source of truth for
+    outbound messages — so the Activity Log captures BOTH sides of every convo.
+    Returns True on send success."""
+    try:
+        client.chat_postMessage(channel=user_id, text=text)
+    except Exception:
+        log.exception("Outbound DM failed to %s (type=%s)", user_id, event_type)
+        return False
+    # Best-effort logging — never block on a sheet write
+    try:
+        worker = WORKERS.get(user_id)
+        if worker:
+            name = worker["name"]
+            tz = worker["tz"]
+        else:
+            # Likely Ideen or another non-roster user (e.g. owner)
+            name = user_id
+            tz = config.MANAGER_TZ
+        # Truncate to keep cells reasonable
+        sheets.append_event(name, user_id, event_type, text[:500], tz)
+    except Exception:
+        log.exception("Failed to log outbound event for %s", user_id)
+    return True
+
+
 def _interval_for(user_id: str) -> int:
     w = WORKERS.get(user_id)
     if w and w.get("checkin_interval_min"):
@@ -430,17 +456,13 @@ def handle_message(event, client) -> None:
     if user_id not in WORKERS:
         reload_roster()
         if user_id not in WORKERS:
-            try:
-                client.chat_postMessage(
-                    channel=user_id,
-                    text=(
-                        f"hey, I'm Sam 👋 I help the team stay in sync on what everyone's "
-                        f"working on. I don't have you on my list yet though — send your "
-                        f"manager your Slack ID so they can add you: `{user_id}`"
-                    ),
-                )
-            except Exception:
-                pass
+            _dm(
+                client, user_id,
+                f"hey, I'm Sam 👋 I help the team stay in sync on what everyone's "
+                f"working on. I don't have you on my list yet though — send your "
+                f"manager your Slack ID so they can add you: `{user_id}`",
+                event_type="sam_not_on_roster",
+            )
             return
 
     worker = WORKERS[user_id]
@@ -458,10 +480,8 @@ def handle_message(event, client) -> None:
     # break-start keyword, in which case just remind them they're still paused).
     if user_id in ON_BREAK:
         if is_break_start(text) and not is_break_end(text) and not is_eod(text):
-            try:
-                client.chat_postMessage(channel=user_id, text="already paused — message me when you're back 👌")
-            except Exception:
-                pass
+            _dm(client, user_id, "already paused — message me when you're back 👌",
+                event_type="sam_break_reminder")
             return
         break_start_ts = ON_BREAK.pop(user_id)
         duration_min = (datetime.now(timezone.utc) - break_start_ts).total_seconds() / 60
@@ -470,13 +490,9 @@ def handle_message(event, client) -> None:
             f"break duration: {duration_min:.0f}min",
             worker["tz"],
         )
-        try:
-            client.chat_postMessage(
-                channel=user_id,
-                text=f"welcome back {first}! that was a {duration_min:.0f}min break — back on the clock 🙌",
-            )
-        except Exception:
-            pass
+        _dm(client, user_id,
+            f"welcome back {first}! that was a {duration_min:.0f}min break — back on the clock 🙌",
+            event_type="sam_resume_ack")
         # Don't return — the current message also counts as a check-in (fall through)
 
     # If not on break, and the message looks like a break-start, pause them.
@@ -489,13 +505,9 @@ def handle_message(event, client) -> None:
             except Exception:
                 pass
             sheets.append_event(worker["name"], user_id, "break_start", text, worker["tz"])
-            try:
-                client.chat_postMessage(
-                    channel=user_id,
-                    text=f"got it {first} — paused the clock 🛑 message me anything when you're back",
-                )
-            except Exception:
-                pass
+            _dm(client, user_id,
+                f"got it {first} — paused the clock 🛑 message me anything when you're back",
+                event_type="sam_break_ack")
             return
 
     if is_eod(text):
@@ -508,21 +520,18 @@ def handle_message(event, client) -> None:
         ON_BREAK.pop(user_id, None)
         summary = report.write_worker_summary(worker)
         break_note = f" ({summary['break_hours']}h on break)" if summary.get("break_hours") else ""
-        client.chat_postMessage(
-            channel=user_id,
-            text=(
-                f"alright {first}, you're out 👋 {summary['active_hours']}h active{break_note}, "
-                f"{len(summary['checkins'])} check-ins. catch you tomorrow.\n\n"
-                f"if those hours look wrong (missed a break, missed a login, etc.) just message me "
-                f"with details — I'll flag it for review."
-            ),
-        )
+        _dm(client, user_id,
+            f"alright {first}, you're out 👋 {summary['active_hours']}h active{break_note}, "
+            f"{len(summary['checkins'])} check-ins. catch you tomorrow.\n\n"
+            f"if those hours look wrong (missed a break, missed a login, etc.) just message me "
+            f"with details — I'll flag it for review.",
+            event_type="sam_eod_ack")
         return
 
     # Worker asking for their current pay-period hours
     if is_hours_query(text):
         try:
-            client.chat_postMessage(channel=user_id, text=_format_hours_summary(worker))
+            _dm(client, user_id, _format_hours_summary(worker), event_type="sam_hours_summary")
         except Exception:
             log.exception("hours summary failed for %s", user_id)
         return
@@ -530,16 +539,10 @@ def handle_message(event, client) -> None:
     # Worker flagging an hours discrepancy — log it for manager review
     if is_discrepancy(text):
         sheets.append_event(worker["name"], user_id, "hours_discrepancy", text, worker["tz"])
-        try:
-            client.chat_postMessage(
-                channel=user_id,
-                text=(
-                    f"got it {first} — I logged that as a discrepancy for Jan to review before "
-                    f"payroll runs. add anything else if you want more context."
-                ),
-            )
-        except Exception:
-            pass
+        _dm(client, user_id,
+            f"got it {first} — I logged that as a discrepancy for Jan to review before "
+            f"payroll runs. add anything else if you want more context.",
+            event_type="sam_discrepancy_ack")
         # Don't return — also treat as a normal check-in (it's still activity)
 
     if LOGGED_IN_TODAY.get(user_id) != today:
@@ -592,29 +595,22 @@ def handle_message(event, client) -> None:
         else:
             plate_q = "\n\nso what's on your plate today? give me a quick idea of what you're tackling."
 
-        client.chat_postMessage(
-            channel=user_id,
-            text=(
-                f"hey {first}! got you in 🙌 I'll loop back every {cadence} to see "
-                f"how things are going. shoot me 'EOD' whenever you wrap up."
-                + view_intro
-                + plate_q
-                + schedule_q
-            ),
-        )
+        _dm(client, user_id,
+            f"hey {first}! got you in 🙌 I'll loop back every {cadence} to see "
+            f"how things are going. shoot me 'EOD' whenever you wrap up."
+            + view_intro
+            + plate_q
+            + schedule_q,
+            event_type="sam_welcome")
         return
 
     ev_type = "help_request" if has_help(text) else "checkin"
     sheets.append_event(worker["name"], user_id, ev_type, text, worker["tz"])
     schedule_next_prompt(user_id)
     if ev_type == "help_request":
-        try:
-            client.chat_postMessage(
-                channel=user_id,
-                text="noted — flagging this for the manager. drop more detail if you need it sooner.",
-            )
-        except Exception:
-            pass
+        _dm(client, user_id,
+            "noted — flagging this for the manager. drop more detail if you need it sooner.",
+            event_type="sam_help_ack")
     else:
         # Everyone — admins AND workers — gets a real conversational reply for
         # things that didn't match a specific command. Different prompts per role.
@@ -627,7 +623,7 @@ def handle_message(event, client) -> None:
                 is_worker=not (is_owner or is_manager),
             )
             if reply:
-                client.chat_postMessage(channel=user_id, text=reply)
+                _dm(client, user_id, reply, event_type="sam_chat")
         except Exception:
             log.exception("conversational reply failed for %s", worker["name"])
 
@@ -668,13 +664,9 @@ def _handle_knowledge_and_followup(user_id: str, worker: dict, text: str,
                 it["Worker"] = worker["name"]
                 it["Slack User ID"] = user_id
                 sheets.upsert_knowledge(it)
-            try:
-                client.chat_postMessage(
-                    channel=user_id,
-                    text=f"saved 🙌 (logged {len(items)} new {'item' if len(items)==1 else 'items'} to your tools list — thanks)",
-                )
-            except Exception:
-                pass
+            _dm(client, user_id,
+                f"saved 🙌 (logged {len(items)} new {'item' if len(items)==1 else 'items'} to your tools list — thanks)",
+                event_type="sam_knowledge_saved")
             # Refresh existing so we don't double-ask about something we just learned
             existing = sheets.list_worker_knowledge(user_id)
 
@@ -694,10 +686,7 @@ def _handle_knowledge_and_followup(user_id: str, worker: dict, text: str,
     if not decision:
         return
 
-    try:
-        client.chat_postMessage(channel=user_id, text=decision["ask"])
-    except Exception:
-        log.exception("Failed to send follow-up question to %s", user_id)
+    if not _dm(client, user_id, decision["ask"], event_type="sam_followup_question"):
         return
     PENDING_FOLLOWUP[user_id] = {"topic": decision["topic"], "asked_at": datetime.now(timezone.utc)}
     state["count"] += 1
