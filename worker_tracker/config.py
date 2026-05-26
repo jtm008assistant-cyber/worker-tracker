@@ -72,6 +72,7 @@ SUMMARY_TAB = "Daily Summary"
 PROFILE_TAB = "Worker Profile"
 KNOWLEDGE_TAB = "Processes & Tools"
 TIME_OFF_TAB = "Time Off"
+COMMITMENTS_TAB = "Commitments"
 LIBRARY_TAB = "Knowledge Library"
 
 ROSTER_HEADER = [
@@ -107,6 +108,11 @@ TIME_OFF_HEADER = [
     "Date Logged", "Worker", "Slack User ID", "Type",
     "Start Date", "End Date", "Days",
     "Status", "Logged By", "Notes",
+]
+
+COMMITMENTS_HEADER = [
+    "Date Created", "Worker", "Slack User ID", "Commitment",
+    "Mentioned Person", "Status", "Date Resolved", "Resolution Notes",
 ]
 
 # Aggregated company-wide view, one row per unique tool/process across all workers.

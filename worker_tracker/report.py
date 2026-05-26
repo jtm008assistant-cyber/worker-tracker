@@ -101,6 +101,7 @@ def collect_worker_day(worker: dict, local_date: str) -> dict:
 
     profile = sheets.load_profile(worker["user_id"])
     knowledge = sheets.list_worker_knowledge(worker["user_id"])
+    open_commitments = sheets.list_open_commitments(worker["user_id"])
     ai = analyzer.analyze(
         name=worker["name"],
         login_local=hhmm(login_ts),
@@ -111,6 +112,7 @@ def collect_worker_day(worker: dict, local_date: str) -> dict:
         checkins=local_checkins,
         profile=profile,
         knowledge=knowledge,
+        open_commitments=open_commitments,
     )
 
     return {
@@ -129,6 +131,8 @@ def collect_worker_day(worker: dict, local_date: str) -> dict:
         "automation_opportunities": ai["automation_opportunities"],
         "manual_red_flags": ai["manual_red_flags"],
         "capacity_signal": ai["capacity_signal"],
+        "new_commitments": ai.get("new_commitments", []),
+        "resolved_commitments": ai.get("resolved_commitments", []),
         "profile": profile,
     }
 
@@ -153,6 +157,29 @@ def write_worker_summary(worker: dict) -> dict:
         " • ".join(s["manual_red_flags"]),
         s["capacity_signal"],
     ])
+
+    # Persist any new commitments detected today
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    for c in (s.get("new_commitments") or []):
+        try:
+            sheets.append_commitment([
+                today_iso, worker["name"], worker["user_id"],
+                c.get("commitment", ""),
+                c.get("mentioned_person", ""),
+                "open", "", "",
+            ])
+        except Exception:
+            log.exception("Failed to log commitment for %s", worker["name"])
+    # Mark resolved commitments
+    for txt in (s.get("resolved_commitments") or []):
+        try:
+            sheets.mark_commitment_status(
+                worker["user_id"], txt, "done",
+                resolution_notes=f"detected as done in {local_date} check-ins",
+            )
+        except Exception:
+            log.exception("Failed to mark resolved commitment '%s' for %s", txt, worker["name"])
+
     return s
 
 

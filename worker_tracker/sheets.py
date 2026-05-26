@@ -127,6 +127,64 @@ def append_time_off(row: List) -> None:
     ws.append_row(row, value_input_option="USER_ENTERED")
 
 
+def append_commitment(row: List) -> None:
+    """Append a row to the Commitments tab."""
+    ws = open_tracker().worksheet(config.COMMITMENTS_TAB)
+    ws.append_row(row, value_input_option="USER_ENTERED")
+
+
+def list_open_commitments(slack_user_id: str) -> list[dict]:
+    """All open (not done/dropped) commitments for one worker, oldest first."""
+    try:
+        ws = open_tracker().worksheet(config.COMMITMENTS_TAB)
+    except Exception:
+        return []
+    rows = ws.get_all_records()
+    out = []
+    for r in rows:
+        if str(r.get("Slack User ID", "")).strip() != slack_user_id:
+            continue
+        status = (r.get("Status") or "").strip().lower()
+        if status not in ("done", "dropped", "resolved"):
+            out.append(r)
+    out.sort(key=lambda r: str(r.get("Date Created", "")))
+    return out
+
+
+def mark_commitment_status(slack_user_id: str, commitment_text: str,
+                            new_status: str, resolution_notes: str = "") -> bool:
+    """Mark a worker's commitment matching the text as done/dropped. Returns True
+    if a row was updated. Best-effort match — exact text on Commitment col."""
+    try:
+        ws = open_tracker().worksheet(config.COMMITMENTS_TAB)
+    except Exception:
+        return False
+    rows = ws.get_all_values()
+    if not rows:
+        return False
+    header = rows[0]
+    try:
+        sid_col = header.index("Slack User ID")
+        commit_col = header.index("Commitment")
+        status_col = header.index("Status")
+        resolved_col = header.index("Date Resolved")
+        notes_col = header.index("Resolution Notes")
+    except ValueError:
+        return False
+    target_text = commitment_text.strip().lower()
+    today = datetime.now(timezone.utc).date().isoformat()
+    for i, r in enumerate(rows[1:], start=2):
+        if (len(r) > max(sid_col, commit_col, status_col)
+                and r[sid_col].strip() == slack_user_id
+                and r[commit_col].strip().lower() == target_text):
+            ws.update_cell(i, status_col + 1, new_status)
+            ws.update_cell(i, resolved_col + 1, today)
+            if resolution_notes:
+                ws.update_cell(i, notes_col + 1, resolution_notes)
+            return True
+    return False
+
+
 def time_off_for_worker(slack_user_id: str, year: int | None = None) -> list[dict]:
     """Return all Time Off rows for one worker (optionally filtered to a specific year by Start Date)."""
     try:

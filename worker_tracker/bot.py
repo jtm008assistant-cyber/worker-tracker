@@ -391,13 +391,15 @@ def send_prompt(user_id: str) -> None:
     first = worker["name"].split()[0] if worker["name"] else "friend"
 
     # Try a Gemini-generated contextual prompt that references the worker's
-    # most recent check-in. Falls back to the generic prompt if Gemini fails.
+    # most recent check-in AND any aging open commitments. Falls back to the
+    # generic prompt if Gemini fails.
     text = None
     try:
         today = _local_today(worker)
         today_events = [r for r in sheets.activity_rows(today) if r.get("Slack User ID") == user_id]
         today_events.sort(key=lambda r: r.get("Timestamp UTC", ""))
-        text = analyzer.generate_checkin_prompt(worker, today_events)
+        open_commits = sheets.list_open_commitments(user_id)
+        text = analyzer.generate_checkin_prompt(worker, today_events, open_commitments=open_commits)
     except Exception:
         log.exception("contextual check-in prompt failed for %s; falling back", user_id)
 

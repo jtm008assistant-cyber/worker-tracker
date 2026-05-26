@@ -149,6 +149,11 @@ def main() -> None:
     timeoff.update(values=[wt.TIME_OFF_HEADER], range_name="A1", value_input_option="USER_ENTERED")
     _format_header(timeoff, wt.TIME_OFF_HEADER)
 
+    # Commitments — cross-day follow-ups ("ger said she'd talk to rey about tiktok")
+    commitments = ss.add_worksheet(title=wt.COMMITMENTS_TAB, rows=500, cols=len(wt.COMMITMENTS_HEADER))
+    commitments.update(values=[wt.COMMITMENTS_HEADER], range_name="A1", value_input_option="USER_ENTERED")
+    _format_header(commitments, wt.COMMITMENTS_HEADER)
+
     # ---------------- PAYROLL SHEET (separate) ----------------
     payroll_id, ps = _create_sheet(drive, gc, args.payroll_title, folder_id, args.email)
     payroll_ws = ps.sheet1

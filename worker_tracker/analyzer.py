@@ -31,6 +31,8 @@ EMPTY_DAILY = {
     "automation_opportunities": [],
     "manual_red_flags": [],
     "capacity_signal": "",
+    "new_commitments": [],
+    "resolved_commitments": [],
 }
 
 URL_RE = __import__("re").compile(r"https?://[^\s<>\"']+")
@@ -82,11 +84,13 @@ def _profile_context_block(profile: dict | None) -> str:
 
 
 _DAILY_SYSTEM_PROMPT = """You are an AI ops/HR analyst for a small team at Hey Girl Tea. Your
-job is to audit each worker's day to help the manager spot two things:
+job is to audit each worker's day to help the manager spot three things:
 
 1. Tasks that could be AUTOMATED (specific scripts, no-code tools, AI
    prompts, integrations).
 2. MANUAL or repetitive grunt-work that's eating their time.
+3. COMMITMENTS the worker made today (things they said they'd do or
+   coordinate with someone about) — so Sam can follow up later.
 
 You have history about each worker. Use it. If their prior profile already
 flagged an automation opportunity and they're doing the same manual task
@@ -110,13 +114,24 @@ Output schema — JSON ONLY, matching this shape exactly:
   "day_summary": "2-3 sentences plain English: what they actually did today, referencing prior-profile patterns where relevant",
   "automation_opportunities": ["concrete bullet ≤25 words; if repeating a prior flag, prefix with 'REPEAT: '", ...],
   "manual_red_flags": ["concrete bullet ≤25 words pointing at manual/repetitive work", ...],
-  "capacity_signal": "one of: spare capacity | balanced | stretched | stuck"
+  "capacity_signal": "one of: spare capacity | balanced | stretched | stuck",
+  "new_commitments": [
+    {"commitment": "concise statement of what they said they'd do",
+     "mentioned_person": "name if they're coordinating with a teammate, else empty"}
+  ],
+  "resolved_commitments": ["exact text of an earlier-recorded open commitment that today's check-ins indicate is now done"]
 }
 
 Rules:
-- Max 5 items per list. Empty list if nothing genuine — do NOT pad with vague suggestions.
+- Max 5 items per analytical list. Empty list if nothing genuine.
+- COMMITMENTS specifically: include things like "I'll set up the TikTok accounts
+  later", "I'll talk to Rey about [X]", "going to follow up with the supplier",
+  "need to fix the report tomorrow". Skip vague intent without object ("I'll do more").
+- For resolved_commitments: ONLY include items that match an existing OPEN commitment
+  from the prior profile / past activity that today's check-ins confirm is done.
+  Match by intent, not exact text. Use the original commitment's exact text in the
+  array so it can be programmatically marked done.
 - Each bullet must reference something the worker actually did or said today.
-- Be specific: "write a Python script to import LinkedIn export into HubSpot via API" beats "automate data entry".
 - Output ONLY the JSON. No prose before or after. No code fences."""
 
 
@@ -124,7 +139,8 @@ def _build_daily_user_block(name: str, login_local: str, eod_local: str, active_
                             help_count: int, missed: int,
                             checkins: Iterable[tuple[datetime, str]],
                             profile: dict | None,
-                            knowledge: list[dict] | None = None) -> str:
+                            knowledge: list[dict] | None = None,
+                            open_commitments: list[dict] | None = None) -> str:
     """The variable per-worker context — comes AFTER the cached system prompt."""
     lines = [
         f"[{t.strftime('%H:%M')}] {m.strip() or '(empty reply)'}"
@@ -133,9 +149,19 @@ def _build_daily_user_block(name: str, login_local: str, eod_local: str, active_
     checkin_block = "\n".join(lines) if lines else "(no check-in replies recorded)"
     profile_block = _profile_context_block(profile)
     knowledge_block = _knowledge_block(knowledge or [])
+
+    commit_block = ""
+    if open_commitments:
+        commit_lines = ["OPEN COMMITMENTS from earlier (use to decide which are now resolved):"]
+        for c in open_commitments[:20]:
+            txt = (c.get("Commitment") or "").strip()
+            created = (c.get("Date Created") or "").strip()
+            commit_lines.append(f"- [{created}] \"{txt}\"")
+        commit_block = "\n" + "\n".join(commit_lines) + "\n"
+
     return f"""{profile_block}
 
-{knowledge_block}
+{knowledge_block}{commit_block}
 
 TODAY:
 Worker: {name}
@@ -150,7 +176,8 @@ def analyze(name: str, login_local: str, eod_local: str, active_hours: float,
             help_count: int, missed: int,
             checkins: list[tuple[datetime, str]],
             profile: dict | None = None,
-            knowledge: list[dict] | None = None) -> dict:
+            knowledge: list[dict] | None = None,
+            open_commitments: list[dict] | None = None) -> dict:
     """Daily analysis. Never raises. profile is the persistent Worker Profile row."""
     if not config.GOOGLE_API_KEY:
         log.info("No GOOGLE_API_KEY; skipping Gemini analysis for %s", name)
@@ -159,7 +186,8 @@ def analyze(name: str, login_local: str, eod_local: str, active_hours: float,
         return dict(EMPTY_DAILY)
     try:
         user_block = _build_daily_user_block(
-            name, login_local, eod_local, active_hours, help_count, missed, checkins, profile, knowledge,
+            name, login_local, eod_local, active_hours, help_count, missed, checkins,
+            profile, knowledge, open_commitments=open_commitments,
         )
         data = deep_brain.deep_json(_DAILY_SYSTEM_PROMPT, user_block, max_tokens=4000)
     except Exception as e:
@@ -175,6 +203,19 @@ def analyze(name: str, login_local: str, eod_local: str, active_hours: float,
             out[k] = [str(x).strip() for x in v if str(x).strip()][:5]
     if isinstance(data.get("capacity_signal"), str):
         out["capacity_signal"] = data["capacity_signal"].strip().lower()
+    nc = data.get("new_commitments")
+    if isinstance(nc, list):
+        cleaned = []
+        for c in nc[:10]:
+            if isinstance(c, dict) and c.get("commitment"):
+                cleaned.append({
+                    "commitment": str(c["commitment"]).strip(),
+                    "mentioned_person": str(c.get("mentioned_person", "")).strip(),
+                })
+        out["new_commitments"] = cleaned
+    rc = data.get("resolved_commitments")
+    if isinstance(rc, list):
+        out["resolved_commitments"] = [str(x).strip() for x in rc if str(x).strip()][:10]
     return out
 
 
@@ -689,6 +730,13 @@ GOOD examples (warm, contextual, short):
 - "yo norks, how's it going? any wins, any blockers from the last bit?"
 - "hey ger 👋 anything to flag, or smooth sailing this stretch?"
 - "hey hannah, you mentioned the lead tracker earlier — get through it, or still digging?"
+
+CROSS-DAY FOLLOW-UPS (use when there's an aging open commitment listed above
+and it fits naturally — prefer this over a generic 'how's it going' if the
+commitment is fresh enough to actually be in motion):
+- "hey ger, did you end up talking to rey about the tiktok accounts? curious if that got moving."
+- "yo hannah, the walmart case follow-up from yesterday — any update there?"
+- "hey jonny, did you get the supplier emails out you mentioned earlier?"
 
 BAD examples (robotic, generic, doesn't reference context):
 - "Hi Rey. Please describe what you have been working on."
