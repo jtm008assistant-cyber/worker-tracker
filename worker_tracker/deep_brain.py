@@ -86,15 +86,16 @@ def deep_json(system_prompt: str, user_content: str, max_tokens: int = 8000) -> 
     if config.ANTHROPIC_API_KEY:
         return _anthropic_json(system_prompt, user_content, max_tokens)
 
-    # Fallback path: combine into one Gemini Pro prompt
-    log.info("ANTHROPIC_API_KEY not set — falling back to Gemini Pro for this deep call")
+    # Fallback path: same Gemini Flash everything else uses — zero incremental cost.
+    # If you want the smart brain later, set ANTHROPIC_API_KEY in Railway and you're in.
+    log.info("ANTHROPIC_API_KEY not set — falling back to Gemini Flash for this deep call")
     from google import genai
     from google.genai import types
 
     combined = system_prompt + "\n\n" + user_content
     client = genai.Client(api_key=config.GOOGLE_API_KEY)
     resp = client.models.generate_content(
-        model="gemini-2.5-pro",
+        model=config.GEMINI_MODEL,  # gemini-2.5-flash by default
         contents=[types.Content(role="user", parts=[types.Part.from_text(text=combined)])],
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
