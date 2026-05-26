@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import config, sheets, report, analyzer, payroll, worker_views, onboarding, memory
+from . import config, sheets, report, analyzer, payroll, worker_views, onboarding, memory, drive_audit
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
@@ -35,6 +35,7 @@ _admin_status_re = re.compile("|".join(config.ADMIN_STATUS_PATTERNS), re.IGNOREC
 _admin_time_off_re = re.compile("|".join(config.ADMIN_TIME_OFF_PATTERNS), re.IGNORECASE)
 _admin_benefits_query_re = re.compile("|".join(config.ADMIN_BENEFITS_QUERY_PATTERNS), re.IGNORECASE)
 _timeoff_balance_query_re = re.compile("|".join(config.TIMEOFF_BALANCE_QUERY_PATTERNS), re.IGNORECASE)
+_admin_drive_audit_re = re.compile("|".join(config.ADMIN_DRIVE_AUDIT_PATTERNS), re.IGNORECASE)
 _admin_forward_re = re.compile("|".join(config.ADMIN_FORWARD_PATTERNS), re.IGNORECASE | re.DOTALL)
 
 scheduler = BackgroundScheduler()
@@ -538,6 +539,11 @@ def handle_message(event, client) -> None:
         _handle_benefits_collection_request(user_id, text, client)
         return
 
+    # Owner command: audit the drive (gold/decent/stale/garbage/orphan)
+    if is_owner and _admin_drive_audit_re.search(text):
+        _handle_drive_audit(user_id, client)
+        return
+
     # Worker query: balance check (vacation/sick/pto days left)
     if _timeoff_balance_query_re.search(text):
         _handle_balance_query(user_id, client, worker)
@@ -962,6 +968,35 @@ def _handle_planning_reply(user_id: str, text: str, client) -> bool:
     except Exception:
         pass
     return True
+
+
+def _handle_drive_audit(admin_user_id: str, client) -> None:
+    """Run a full drive audit and DM the classified file list back to the admin."""
+    _dm(client, admin_user_id, "running drive audit — give me ~10 sec while I scan everything…",
+        event_type="sam_audit_starting")
+    try:
+        result = drive_audit.audit()
+        text = drive_audit.format_audit_summary(result)
+    except Exception as e:
+        log.exception("Drive audit failed")
+        _dm(client, admin_user_id, f"hit an error running the audit: {e}",
+            event_type="sam_audit_failed")
+        return
+    # Slack message limit is ~3800 chars per message — split if needed
+    chunks: list[str] = []
+    current = []
+    current_len = 0
+    for line in text.split("\n"):
+        if current_len + len(line) > 3500 and current:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += len(line) + 1
+    if current:
+        chunks.append("\n".join(current))
+    for i, chunk in enumerate(chunks):
+        _dm(client, admin_user_id, chunk, event_type="sam_audit_result")
 
 
 def _handle_log_time_off(admin_user_id: str, text: str, client, worker: dict) -> None:

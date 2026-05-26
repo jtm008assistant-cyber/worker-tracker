@@ -269,18 +269,30 @@ def _admin_convo_history(admin_user_id: str, limit: int = 20) -> str:
 
 # --- Deep dive on one worker ---
 
-def _worker_activity_history(slack_user_id: str, days: int = 60) -> str:
-    """Every raw event for one worker over the past N days. The full record:
-    every check-in message, every break, every login/EOD with timestamps."""
+def _worker_activity_history(slack_user_id: str, days: int | None = None) -> str:
+    """Every raw event for one worker. By default, ALL events (entire history).
+    Pass `days` to limit to last N days if needed."""
     try:
-        rows = sheets.activity_since(days, slack_user_id=slack_user_id)
+        if days is None:
+            # Pull ALL events for this worker, ever
+            ws = sheets.open_tracker().worksheet(config.ACTIVITY_TAB)
+            all_rows = ws.get_all_records()
+            rows = [r for r in all_rows if str(r.get("Slack User ID", "")).strip() == slack_user_id]
+        else:
+            rows = sheets.activity_since(days, slack_user_id=slack_user_id)
     except Exception:
         return ""
     if not rows:
         return ""
     rows.sort(key=lambda r: r.get("Timestamp UTC", ""))
-    lines = [f"FULL ACTIVITY LOG (past {days} days, {len(rows)} events, chronological):"]
-    for r in rows[-400:]:  # cap at 400 events to keep token usage bounded
+    scope = f"all-time, {len(rows)} events" if days is None else f"past {days} days, {len(rows)} events"
+    lines = [f"FULL ACTIVITY LOG ({scope}, chronological):"]
+    # Token budget: cap at 800 most recent so the context stays under ~30K tokens.
+    # If they've got more events than that, keep the newest.
+    events_to_show = rows[-800:] if len(rows) > 800 else rows
+    if len(rows) > 800:
+        lines.append(f"  ... ({len(rows) - 800} older events omitted for brevity — showing most recent 800)")
+    for r in events_to_show:
         date = r.get("Local Date", "")
         time_str = r.get("Local Time", "")
         t = r.get("Type", "")
@@ -292,8 +304,8 @@ def _worker_activity_history(slack_user_id: str, days: int = 60) -> str:
     return "\n".join(lines)
 
 
-def _worker_daily_summaries(worker_name: str, days: int = 60) -> str:
-    """All Daily Summary rows for one worker (AI-summarized days)."""
+def _worker_daily_summaries(worker_name: str, days: int | None = None) -> str:
+    """All Daily Summary rows for one worker — entire history by default."""
     try:
         ws = sheets.open_tracker().worksheet(config.SUMMARY_TAB)
         rows = ws.get_all_records()
@@ -301,15 +313,19 @@ def _worker_daily_summaries(worker_name: str, days: int = 60) -> str:
         return ""
     if not rows:
         return ""
-    today = datetime.now(ZoneInfo(config.MANAGER_TZ)).date()
-    cutoff = (today - timedelta(days=days)).isoformat()
-    relevant = [r for r in rows
-                if str(r.get("Worker", "")).strip() == worker_name
-                and str(r.get("Date", "")) >= cutoff]
+    if days is None:
+        relevant = [r for r in rows if str(r.get("Worker", "")).strip() == worker_name]
+    else:
+        today = datetime.now(ZoneInfo(config.MANAGER_TZ)).date()
+        cutoff = (today - timedelta(days=days)).isoformat()
+        relevant = [r for r in rows
+                    if str(r.get("Worker", "")).strip() == worker_name
+                    and str(r.get("Date", "")) >= cutoff]
     if not relevant:
         return ""
     relevant.sort(key=lambda r: str(r.get("Date", "")))
-    lines = [f"DAILY SUMMARIES — past {days} days ({len(relevant)} days recorded):"]
+    scope = f"all-time ({len(relevant)} days)" if days is None else f"past {days} days ({len(relevant)} days)"
+    lines = [f"DAILY SUMMARIES — {scope}:"]
     for r in relevant:
         date = r.get("Date", "")
         hours = r.get("Active Hours", "")
@@ -405,11 +421,13 @@ def _worker_time_off(slack_user_id: str) -> str:
     return "\n".join(lines)
 
 
-def build_worker_deep_dive(worker: dict, days: int = 60) -> str:
-    """Build a comprehensive dossier on one worker — everything Sam has tracked."""
+def build_worker_deep_dive(worker: dict, days: int | None = None) -> str:
+    """Build a comprehensive dossier on one worker — everything Sam has ever tracked.
+    By default pulls all-time data. Pass `days` to limit to a recent window."""
     name = worker.get("name", "")
     uid = worker.get("user_id", "")
-    sections = [f"=== DEEP DIVE ON {name} (past {days} days) ===",
+    scope = "all-time" if days is None else f"past {days} days"
+    sections = [f"=== DEEP DIVE ON {name} ({scope}) ===",
                 f"Roster info: {worker.get('tz', 'UTC')}, {worker.get('pay_type', 'hourly')},"
                 f" cadence={worker.get('checkin_interval_min', 120)}min"
                 + (f", schedule {worker.get('expected_start', '')}-{worker.get('expected_eod', '')}"
@@ -522,10 +540,10 @@ def build_admin_memory(admin_user_id: str, workers: list[dict],
         log.exception("convo history section failed")
 
     # If the admin's message references specific workers by name, append a full
-    # deep dive on each one. This is where the depth comes from.
+    # deep dive on each one — ALL-TIME data. Sam's full memory on that worker.
     for w in focused:
         try:
-            dd = build_worker_deep_dive(w, days=60)
+            dd = build_worker_deep_dive(w, days=None)  # entire history
             if dd:
                 sections.append(dd)
         except Exception:

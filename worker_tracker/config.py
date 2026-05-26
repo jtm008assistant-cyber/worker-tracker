@@ -226,6 +226,14 @@ ADMIN_INTRODUCE_PATTERNS = (
     r"\bintro all\b",
 )
 
+# Owner command: 'audit drive' / 'drive cleanup' / 'what files do we have'
+ADMIN_DRIVE_AUDIT_PATTERNS = (
+    r"\baudit (?:the )?drive\b",
+    r"\bdrive (?:audit|cleanup|review)\b",
+    r"\bwhat files (?:do we have|are gold|are garbage)\b",
+    r"\bgold (?:and|vs) garbage\b",
+)
+
 # Admin command: "log vacation for hannah dec 1-5" / "sick day for rey today" / etc.
 ADMIN_TIME_OFF_PATTERNS = (
     r"\blog (?:a |the )?(?:vacation|sick|pto|personal|time off|holiday|day off|leave)\b",
