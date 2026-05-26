@@ -144,16 +144,16 @@ def _find_worker_by_name(query: str) -> list[dict]:
     return substr
 
 
-def _format_worker_status(worker: dict) -> str:
-    """Snapshot of where a worker currently is right now. Reads today's
-    Activity Log and pay-period summary."""
-    from . import payroll as _payroll
+def _worker_today_snapshot(worker: dict) -> dict:
+    """Compute today's open-session state + hours-so-far for one worker.
+    Returns dict with: state, login_ts, eod_ts, last_checkin_ts, last_checkin_msg,
+    break_start_ts, hours_so_far_today, today_checkins (list of strings).
+    """
     try:
         tz = ZoneInfo(worker["tz"])
     except Exception:
         tz = ZoneInfo("UTC")
-    now_local = datetime.now(tz)
-    today = now_local.date().isoformat()
+    today = datetime.now(tz).date().isoformat()
     rows = [r for r in sheets.activity_rows(today) if r.get("Slack User ID") == worker["user_id"]]
     rows.sort(key=lambda r: r.get("Timestamp UTC", ""))
 
@@ -161,6 +161,8 @@ def _format_worker_status(worker: dict) -> str:
     last_checkin_msg = ""
     break_start_ts = None
     state = "not_started"
+    today_checkins: list[str] = []
+    total_break_seconds = 0.0
     for r in rows:
         try:
             ts = datetime.fromisoformat(r["Timestamp UTC"]).astimezone(timezone.utc)
@@ -174,16 +176,64 @@ def _format_worker_status(worker: dict) -> str:
         elif t == "eod":
             eod_ts = ts
             state = "logged_off"
-            break_start_ts = None
-        elif t == "checkin" or t == "help_request":
+            if break_start_ts:
+                total_break_seconds += (ts - break_start_ts).total_seconds()
+                break_start_ts = None
+        elif t in ("checkin", "help_request"):
             last_checkin_ts = ts
             last_checkin_msg = msg
+            if msg.strip():
+                today_checkins.append(msg.strip()[:300])
         elif t == "break_start":
             break_start_ts = ts
             state = "on_break"
         elif t == "break_end":
+            if break_start_ts:
+                total_break_seconds += (ts - break_start_ts).total_seconds()
             break_start_ts = None
             state = "working"
+
+    # Compute hours so far today
+    hours_so_far = 0.0
+    if login_ts:
+        end_ts = eod_ts or datetime.now(timezone.utc)
+        elapsed = (end_ts - login_ts).total_seconds()
+        break_seconds = total_break_seconds
+        # If currently on break, count time-on-break-so-far too
+        if break_start_ts and state == "on_break":
+            break_seconds += (datetime.now(timezone.utc) - break_start_ts).total_seconds()
+        hours_so_far = max(0.0, round((elapsed - break_seconds) / 3600.0, 2))
+
+    return {
+        "tz": worker.get("tz", "UTC"),
+        "state": state,
+        "login_ts": login_ts,
+        "eod_ts": eod_ts,
+        "last_checkin_ts": last_checkin_ts,
+        "last_checkin_msg": last_checkin_msg,
+        "break_start_ts": break_start_ts,
+        "hours_so_far_today": hours_so_far,
+        "today_checkins": today_checkins,
+    }
+
+
+def _format_worker_status(worker: dict) -> str:
+    """Snapshot of where a worker currently is right now. Reads today's
+    Activity Log and pay-period summary, AND includes today's open-session
+    hours (Daily Summary alone misses mid-shift work)."""
+    from . import payroll as _payroll
+    snap = _worker_today_snapshot(worker)
+    state = snap["state"]
+    login_ts = snap["login_ts"]
+    eod_ts = snap["eod_ts"]
+    last_checkin_ts = snap["last_checkin_ts"]
+    last_checkin_msg = snap["last_checkin_msg"]
+    break_start_ts = snap["break_start_ts"]
+    hours_so_far = snap["hours_so_far_today"]
+    try:
+        tz = ZoneInfo(worker["tz"])
+    except Exception:
+        tz = ZoneInfo("UTC")
 
     first = worker["name"].split()[0] if worker["name"] else worker["name"]
 
@@ -199,11 +249,19 @@ def _format_worker_status(worker: dict) -> str:
             + (f"last seen: {last_seen}" if last_seen else "no recent activity recorded")
         )
 
-    # Get pay-period totals for context
+    # Get pay-period totals — past closed days come from Daily Summary; today's
+    # open session is added on top via hours_so_far (since Daily Summary only
+    # gets written at EOD).
     try:
         start, end = _payroll.current_open_period()
         totals = _payroll.worker_period_totals(worker, start, end)
-        period_line = f"pay period ({start} → {end}): {totals['total_hours']}h logged"
+        # If they're working today, today's hours aren't yet in Daily Summary —
+        # add them so the displayed total is the real "hours so far this period"
+        period_total = totals["total_hours"] + (hours_so_far if state != "logged_off" else 0)
+        period_line = (
+            f"pay period ({start} → {end}): *{period_total:.2f}h* total "
+            f"({totals['total_hours']:.2f}h from previous days + {hours_so_far:.2f}h today)"
+        )
     except Exception:
         period_line = ""
 
@@ -212,7 +270,7 @@ def _format_worker_status(worker: dict) -> str:
         eod_str = eod_ts.astimezone(tz).strftime("%H:%M") if eod_ts else "—"
         return (
             f"⚫ *{worker['name']}* — logged off for the day\n"
-            f"login {login_str} → EOD {eod_str} ({worker['tz']})\n"
+            f"login {login_str} → EOD {eod_str} ({worker['tz']}) · {hours_so_far:.2f}h today\n"
             f"{period_line}"
         )
 
@@ -232,10 +290,54 @@ def _format_worker_status(worker: dict) -> str:
 
     return (
         f"{header}\n"
-        f"clocked in at {login_str} {worker['tz']}"
+        f"clocked in at {login_str} {worker['tz']} · {hours_so_far:.2f}h on the clock today"
         f"{last_ck_line}\n"
         f"{period_line}"
     )
+
+
+def _build_team_state_for_admin() -> str:
+    """Build a compact team state block to feed into admin conversational replies.
+    Lets Sam answer follow-up questions like 'why did Hannah log 0 hours' or
+    'is Rey done yet' without the admin re-asking 'status of X'.
+    """
+    if not WORKERS:
+        return "(no workers loaded yet)"
+    from datetime import datetime as _dt
+    now_mgr = _dt.now(ZoneInfo(config.MANAGER_TZ))
+    lines = [f"CURRENT TEAM STATE (manager-local time {now_mgr.strftime('%Y-%m-%d %H:%M')} {config.MANAGER_TZ}):"]
+    for w in WORKERS.values():
+        if w["user_id"] in config.OWNER_SLACK_IDS:
+            continue  # owners aren't tracked as workers
+        try:
+            snap = _worker_today_snapshot(w)
+        except Exception:
+            continue
+        tz = w.get("tz", "UTC")
+        try:
+            tzi = ZoneInfo(tz)
+        except Exception:
+            tzi = ZoneInfo("UTC")
+        login_str = snap["login_ts"].astimezone(tzi).strftime("%H:%M") if snap["login_ts"] else "—"
+        state = snap["state"]
+        h_today = snap["hours_so_far_today"]
+        bits = [f"- {w['name']} ({tz}, state={state}, today={h_today:.2f}h"]
+        if snap["login_ts"]:
+            bits.append(f", login={login_str}")
+        if state == "on_break" and snap["break_start_ts"]:
+            mins = int((datetime.now(timezone.utc) - snap["break_start_ts"]).total_seconds() / 60)
+            bits.append(f", on break {mins}min")
+        if snap["last_checkin_msg"]:
+            mins = int((datetime.now(timezone.utc) - snap["last_checkin_ts"]).total_seconds() / 60) if snap["last_checkin_ts"] else 0
+            bits.append(f", last check-in {mins}m ago: \"{snap['last_checkin_msg'][:200]}\"")
+        bits.append(")")
+        lines.append("".join(bits))
+    # Note about period totals
+    lines.append("")
+    lines.append("Note: 'today=Xh' includes ALL hours worked so far today (open session counted, "
+                 "breaks subtracted). Daily Summary only gets written at EOD, so before EOD the bot "
+                 "calculates hours-so-far from login + break events on the Activity Log.")
+    return "\n".join(lines)
 
 
 def _dm(client, user_id: str, text: str, event_type: str = "sam_reply") -> bool:
@@ -645,13 +747,17 @@ def handle_message(event, client) -> None:
         # specific command. If they were responding to Sam's periodic check-in
         # prompt, ALWAYS acknowledge — even a simple 'thanks for the update' so
         # they know Sam saw it. Otherwise respect Gemini's SKIP judgment.
+        # For admins, also include current team state so Sam can answer
+        # follow-up questions about specific workers.
         try:
+            team_state = _build_team_state_for_admin() if is_admin else ""
             reply = analyzer.conversational_reply(
                 message=text,
                 speaker_name=worker["name"],
                 is_owner=is_owner,
                 is_manager=is_manager and not is_owner,
                 is_worker=not (is_owner or is_manager),
+                team_state=team_state,
             )
             if not reply and was_responding_to_prompt:
                 # Gemini SKIPped but we MUST ack — fallback canned thanks

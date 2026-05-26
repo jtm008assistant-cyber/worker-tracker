@@ -680,9 +680,14 @@ Output ONLY the prompt text — no quotes, no preamble, no JSON.
 
 def conversational_reply(message: str, speaker_name: str, is_owner: bool,
                           is_manager: bool, is_worker: bool = False,
-                          recent_context: str = "") -> str | None:
+                          recent_context: str = "",
+                          team_state: str = "") -> str | None:
     """Generate a useful conversational reply for messages that didn't match a
     specific command pattern. Returns None to stay silent.
+
+    team_state: for admin speakers, a compact block describing each worker's
+    current state — lets Sam answer follow-up questions like 'why did Hannah
+    log 0 hours' or 'is Rey done' without the admin re-issuing 'status of X'.
     """
     if not config.GOOGLE_API_KEY or not message.strip():
         return None
@@ -729,6 +734,7 @@ def conversational_reply(message: str, speaker_name: str, is_owner: bool,
         )
 
     ctx_block = f"\nRecent context for this worker:\n{recent_context}\n" if recent_context else ""
+    team_block = f"\n{team_state}\n" if team_state else ""
 
     prompt = f"""You are Sam, the AI ops assistant for Hey Girl Tea. Your main
 job is time tracking: workers DM you to clock in, take breaks, and end their
@@ -739,7 +745,7 @@ WHO IS MESSAGING:
 
 THEIR MESSAGE:
 "{message.strip()}"
-{ctx_block}
+{ctx_block}{team_block}
 YOUR CAPABILITIES:
 {capabilities}
 
@@ -751,10 +757,11 @@ YOUR VOICE:
 - Match their energy: short reply for short message, longer if they ask a real question.
 
 RULES:
+- If TEAM STATE is provided and the manager asks about a specific worker (status, hours, what they did, when they started, etc.), USE THE DATA — don't say "I can't pull that." All the data you need is right there.
 - If their message is genuinely about your capabilities or how to use you, answer the actual question. Don't be vague.
 - If they ask about something outside your tools (jokes, life advice, weather), play along briefly but redirect to what you can do.
 - If they're complaining/frustrated, acknowledge it directly. Don't be saccharine.
-- If they ask a question YOU can answer with data (e.g. "what's my latest check-in"), say so but flag that you can't actually pull that until they teach you how (i.e. don't hallucinate data).
+- For data you genuinely don't have access to, say so honestly. Don't hallucinate.
 - Output the REPLY ONLY. No quotes, no preamble, no JSON.
 - If nothing useful to say (e.g. just an emoji or 'ok'), output: SKIP
 """
@@ -763,7 +770,7 @@ RULES:
         resp = client.models.generate_content(
             model=config.GEMINI_MODEL,
             contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.6, max_output_tokens=600),
+            config=types.GenerateContentConfig(temperature=0.6, max_output_tokens=1500),
         )
         reply = (resp.text or "").strip()
         if not reply or reply.upper() == "SKIP":
