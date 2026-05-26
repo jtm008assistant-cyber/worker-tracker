@@ -624,6 +624,35 @@ def handle_message(event, client) -> None:
         pass
 
     # --- Break handling ---
+    # Recovery: if Sam was offline when the worker started a break, ON_BREAK is
+    # empty even though Activity Log shows an open break_start. If this message
+    # is an explicit break-end keyword, scan today's log for an unclosed break
+    # and hydrate ON_BREAK from it so the normal resume branch below runs.
+    if user_id not in ON_BREAK and is_break_end(text):
+        try:
+            today_local = _local_today(worker)
+            rows = [r for r in sheets.activity_rows(today_local)
+                    if r.get("Slack User ID") == user_id]
+            rows.sort(key=lambda r: r.get("Timestamp UTC", ""))
+            unclosed_break_ts = None
+            for r in rows:
+                t = r.get("Type")
+                if t == "break_start":
+                    try:
+                        ts = datetime.fromisoformat(str(r.get("Timestamp UTC", "")))
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        unclosed_break_ts = ts
+                    except Exception:
+                        pass
+                elif t in ("break_end", "login", "eod"):
+                    unclosed_break_ts = None
+            if unclosed_break_ts is not None:
+                ON_BREAK[user_id] = unclosed_break_ts
+                log.info("Recovered unclosed break for %s from log", worker["name"])
+        except Exception:
+            log.exception("Break recovery scan failed for %s", user_id)
+
     # If they're already on break, any message resumes them (unless it's another
     # break-start keyword, in which case just remind them they're still paused).
     if user_id in ON_BREAK:
@@ -901,22 +930,44 @@ def _handle_knowledge_and_followup(user_id: str, worker: dict, text: str,
 
 
 def restore_state() -> None:
-    """On startup: any worker logged in today w/ no EOD → resume their schedule."""
+    """On startup: any worker logged in today w/ no EOD → resume their schedule.
+    Also restores ON_BREAK so a deploy mid-break doesn't lose the worker's
+    pause state (the in-memory dict gets wiped on restart — without this, a
+    'back' message after a redeploy would not clock them back in).
+    """
     for user_id, worker in WORKERS.items():
         today = _local_today(worker)
         rows = [r for r in sheets.activity_rows(today) if r.get("Slack User ID") == user_id]
         rows.sort(key=lambda r: r.get("Timestamp UTC", ""))
         logged_in = False
+        on_break_since: datetime | None = None
         for r in rows:
             t = r.get("Type")
             if t == "login":
                 logged_in = True
+                on_break_since = None  # new login closes any stale break state
             elif t == "eod":
                 logged_in = False
+                on_break_since = None
+            elif t == "break_start":
+                try:
+                    ts = datetime.fromisoformat(str(r.get("Timestamp UTC", "")))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    on_break_since = ts
+                except Exception:
+                    pass
+            elif t == "break_end":
+                on_break_since = None
         if logged_in:
             LOGGED_IN_TODAY[user_id] = today
-            schedule_next_prompt(user_id)
-            log.info("Resumed active session for %s", worker["name"])
+            if on_break_since is not None:
+                ON_BREAK[user_id] = on_break_since
+                log.info("Restored ON_BREAK for %s (since %s)", worker["name"], on_break_since.isoformat())
+            else:
+                schedule_next_prompt(user_id)
+            log.info("Resumed active session for %s (on_break=%s)",
+                     worker["name"], on_break_since is not None)
 
 
 def schedule_daily_digest() -> None:

@@ -204,8 +204,14 @@ BREAK_START_PATTERNS = (
     r"\bpause\b", r"\bpausing\b",
 )
 BREAK_END_PATTERNS = (
-    r"\bi'?m back\b", r"\bback from break\b", r"\bback from lunch\b",
+    # "i'm back" with or without apostrophe; also "i am back"
+    r"\bi'?m back\b", r"\bi am back\b", r"\bim back\b",
+    r"\bback from break\b", r"\bback from lunch\b",
     r"\bresumed\b", r"\bresuming\b", r"\bunpause\b",
+    # Short / standalone forms — common after a long break
+    r"^\s*back\s*[!.?]*\s*$",          # message body is literally just "back" / "back!" / "back?"
+    r"\bback now\b", r"\bok back\b", r"\back i'?m back\b",
+    r"\bready to (?:go|work|resume)\b",
 )
 
 # Worker asks how many hours they've worked — Sam replies with their period total
