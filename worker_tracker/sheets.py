@@ -118,6 +118,14 @@ def load_roster() -> List[dict]:
             "holiday_days_year": _f("Holiday Days/Year"),
             "pto_days_year": _f("PTO Days/Year"),
             "benefits_notes": str(r.get("Benefits Notes", "")).strip(),
+            "hourly_rate_contract": str(r.get("Hourly Rate (from Contract)", "")).strip(),
+            "pay_schedule": str(r.get("Pay Schedule", "")).strip(),
+            "hmo_reimbursement_php": _f("HMO Reimbursement (PHP/yr)"),
+            "thirteenth_month_eligible": str(r.get("13th Month Eligible", "")).strip(),
+            "perf_bonus_date": str(r.get("Performance Bonus Date", "")).strip(),
+            "calamity_fund_php": _f("Calamity Fund (PHP/yr)"),
+            "contract_start": str(r.get("Contract Start Date", "")).strip(),
+            "probation_end": str(r.get("Probation End Date", "")).strip(),
         })
     return workers
 

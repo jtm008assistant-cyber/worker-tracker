@@ -1119,6 +1119,120 @@ def schedule_daily_digest() -> None:
     log.info("Daily digest scheduled %s %s", config.REPORT_TIME_LOCAL, config.MANAGER_TZ)
 
 
+def notify_year_end_benefits() -> None:
+    """Mid-November reminder: bundle every Dec 1 / Dec 16 / Dec 31 worker
+    payment obligation into one DM to Jan so he can budget the Dec payroll
+    runs.
+
+    Triggered by an annual cron on Nov 15 at MANAGER_TZ 10:00. Idempotent —
+    no state, recomputes every year from the live Roster.
+    """
+    reload_roster()
+    lines: list[str] = []
+    for worker in WORKERS.values():
+        if not worker.get("active", True):
+            continue
+        if worker.get("user_id") in config.OWNER_SLACK_IDS:
+            continue  # Don't include Jan/owner rows
+        first = worker["name"].split()[0]
+        bullets: list[str] = []
+
+        if str(worker.get("thirteenth_month_eligible") or "").lower().startswith("yes"):
+            bullets.append("13th Month Bonus on Dec 1 (performance-based, prorated)")
+
+        pbd = (worker.get("perf_bonus_date") or "").strip()
+        if pbd and "dec" in pbd.lower():
+            bullets.append(f"Performance Bonus on {pbd} (3mo+ service required)")
+
+        try:
+            hmo = int(float(worker.get("hmo_reimbursement_php") or 0))
+        except (TypeError, ValueError):
+            hmo = 0
+        if hmo > 0:
+            bullets.append(f"HMO Reimbursement: PHP {hmo:,} (Maxicare card)")
+
+        try:
+            cf = int(float(worker.get("calamity_fund_php") or 0))
+        except (TypeError, ValueError):
+            cf = 0
+        if cf > 0:
+            bullets.append(f"Calamity Fund: PHP {cf:,} cash-out on Dec 31 if unused")
+
+        if bullets:
+            lines.append(f"*{first}*")
+            for b in bullets:
+                lines.append(f"  • {b}")
+
+    if not lines or not config.OWNER_SLACK_IDS:
+        log.info("notify_year_end_benefits: nothing due")
+        return
+
+    msg = (
+        "Heads up — year-end worker payment obligations from the contracts:\n\n"
+        + "\n".join(lines)
+        + "\n\n_Sharing now so you can plan the Dec 1 + Dec 16 payroll runs."
+        " I'll surface the Jan 15 perf bonuses in a separate Jan 5 ping._"
+    )
+    for owner_id in config.OWNER_SLACK_IDS:
+        try:
+            _app.client.chat_postMessage(channel=owner_id, text=msg)
+            sheets.append_event("Sam", owner_id, "sam_year_end_benefits_reminder", msg[:200], config.MANAGER_TZ)
+        except Exception:
+            log.exception("notify_year_end_benefits: DM to %s failed", owner_id)
+
+
+def notify_january_benefits() -> None:
+    """Early-January reminder: Jan 15 performance bonuses (Hannah etc.)
+    plus a note that leave balances reset Jan 1.
+    Cron: Jan 5 at MANAGER_TZ 10:00.
+    """
+    reload_roster()
+    lines: list[str] = []
+    for worker in WORKERS.values():
+        if not worker.get("active", True):
+            continue
+        if worker.get("user_id") in config.OWNER_SLACK_IDS:
+            continue
+        first = worker["name"].split()[0]
+        pbd = (worker.get("perf_bonus_date") or "").strip()
+        if pbd and "jan" in pbd.lower():
+            lines.append(f"• *{first}* — Performance Bonus on {pbd}")
+
+    if not lines or not config.OWNER_SLACK_IDS:
+        log.info("notify_january_benefits: nothing due")
+        return
+
+    msg = (
+        "January worker payment obligations:\n\n"
+        + "\n".join(lines)
+        + "\n\n_FYI: vacation / sick / holiday / PTO balances reset Jan 1 for"
+        " all employees — workers asking about their balance from now on will"
+        " see the fresh annual allocation._"
+    )
+    for owner_id in config.OWNER_SLACK_IDS:
+        try:
+            _app.client.chat_postMessage(channel=owner_id, text=msg)
+            sheets.append_event("Sam", owner_id, "sam_jan_benefits_reminder", msg[:200], config.MANAGER_TZ)
+        except Exception:
+            log.exception("notify_january_benefits: DM to %s failed", owner_id)
+
+
+def schedule_benefits_reminders() -> None:
+    """Two annual crons: Nov 15 (Dec payroll planning) + Jan 5 (Jan bonuses)."""
+    tz = ZoneInfo(config.MANAGER_TZ)
+    scheduler.add_job(
+        notify_year_end_benefits, "cron",
+        month=11, day=15, hour=10, minute=0, timezone=tz,
+        id="benefits_reminder_year_end",
+    )
+    scheduler.add_job(
+        notify_january_benefits, "cron",
+        month=1, day=5, hour=10, minute=0, timezone=tz,
+        id="benefits_reminder_january",
+    )
+    log.info("Benefits reminders scheduled: Nov 15 + Jan 5 at 10:00 %s", config.MANAGER_TZ)
+
+
 def send_daily_planning_question() -> None:
     """DM the manager (Jan by default) asking what each worker should focus on tomorrow.
     Their reply gets parsed by Gemini and saved as daily_assignment events; on the
@@ -1725,6 +1839,7 @@ def main() -> None:
     schedule_pre_payroll_reviews()
     schedule_daily_planning()
     schedule_stale_break_sweep()
+    schedule_benefits_reminders()
     log.info("Starting Socket Mode handler. Ctrl-C to stop.")
     SocketModeHandler(_app, config.SLACK_APP_TOKEN).start()
 

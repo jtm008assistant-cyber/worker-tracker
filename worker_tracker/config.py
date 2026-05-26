@@ -84,6 +84,10 @@ ROSTER_HEADER = [
     "Check-in Frequency (min)", "Personal View Sheet URL", "Nicknames",
     "Vacation Days/Year", "Sick Days/Year", "Holiday Days/Year",
     "PTO Days/Year", "Benefits Notes",
+    "Hourly Rate (from Contract)", "Pay Schedule",
+    "HMO Reimbursement (PHP/yr)", "13th Month Eligible",
+    "Performance Bonus Date", "Calamity Fund (PHP/yr)",
+    "Contract Start Date", "Probation End Date",
 ]
 ACTIVITY_HEADER = ["Timestamp UTC", "Local Date", "Local Time", "Worker", "Slack User ID", "Type", "Message"]
 SUMMARY_HEADER = [
