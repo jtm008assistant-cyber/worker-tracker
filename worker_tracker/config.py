@@ -73,6 +73,7 @@ PROFILE_TAB = "Worker Profile"
 KNOWLEDGE_TAB = "Processes & Tools"
 TIME_OFF_TAB = "Time Off"
 COMMITMENTS_TAB = "Commitments"
+RELAY_TAB = "Relay Queue"
 LIBRARY_TAB = "Knowledge Library"
 
 ROSTER_HEADER = [
@@ -113,6 +114,15 @@ TIME_OFF_HEADER = [
 COMMITMENTS_HEADER = [
     "Date Created", "Worker", "Slack User ID", "Commitment",
     "Mentioned Person", "Status", "Date Resolved", "Resolution Notes",
+]
+
+# Ad-hoc relay: an admin asks Sam to pass a message to a worker the next time
+# the worker logs in. Sam delivers it on clock-in, then notifies the admin
+# when the worker confirms it's done.
+RELAY_HEADER = [
+    "Relay ID", "Date Created", "From Name", "From Slack ID",
+    "To Worker", "To Slack ID", "Message", "Estimated Time",
+    "Status", "Date Delivered", "Date Completed", "Worker Reply", "Notes",
 ]
 
 # Aggregated company-wide view, one row per unique tool/process across all workers.
@@ -271,6 +281,26 @@ TIMEOFF_BALANCE_QUERY_PATTERNS = (
 #   "message Rey - check in pls"
 ADMIN_FORWARD_PATTERNS = (
     r"^(?:send|dm|message|tell|forward)\s+(?:to\s+)?([A-Za-z][\w'.-]*)\s*[:,;-]?\s+(.+)$",
+)
+
+# Ad-hoc deferred relay — admin asks Sam to deliver something the NEXT TIME
+# the worker logs in (or right now if already online). Examples:
+#   "when ger logs in tell her to quickly fix the listing — should only take 15 min"
+#   "next time hannah clocks in, ask her to pull the Q1 numbers"
+#   "have rey upload the new thumbnails when he's online"
+#   "tomorrow when jonny starts can you remind him about the wise account"
+# Pattern is intentionally loose — anything matching here goes through Gemini
+# parse_relay_request() to extract worker + task + optional time estimate.
+ADMIN_RELAY_PATTERNS = (
+    r"\bwhen\s+\w+\s+(?:logs?\s*in|clocks?\s*in|comes?\s+on(?:line)?|starts?|signs?\s*in|is\s+(?:on|online|available|here))\b",
+    r"\bnext\s+time\s+\w+\s+(?:logs?|clocks?|signs?|is)\b",
+    r"\b(?:tell|ask|have|remind|let)\s+\w+\s+(?:when|once|as soon as)\s+(?:she|he|they|s?he)\s+(?:logs?|clocks?|signs?|is|comes?|gets?)\b",
+    r"\btomorrow\s+when\s+\w+\b",
+    r"\bonce\s+\w+\s+(?:is|logs?|clocks?|comes?)\b",
+    # Pronoun-form trailing trigger: "...when he's online", "...when she's back", "...when they're here"
+    r"\bwhen\s+(?:s?he|they|he|she)'?\s*s?\s*(?:is\s+)?(?:on(?:line)?|here|available|back|free|around)\b",
+    # Imperative-style with separated "when" clause: "have rey upload thumbs when hes online"
+    r"\b(?:tell|ask|have|remind|let)\s+\w+\b[^.\n]{0,120}?\bwhen\s+(?:s?he|they|he|she|\w+)'?s?\b",
 )
 
 # Admins can ask "what is X doing" / "where's X" / "status of X" / etc.

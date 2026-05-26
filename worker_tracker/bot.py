@@ -37,6 +37,7 @@ _admin_benefits_query_re = re.compile("|".join(config.ADMIN_BENEFITS_QUERY_PATTE
 _timeoff_balance_query_re = re.compile("|".join(config.TIMEOFF_BALANCE_QUERY_PATTERNS), re.IGNORECASE)
 _admin_drive_audit_re = re.compile("|".join(config.ADMIN_DRIVE_AUDIT_PATTERNS), re.IGNORECASE)
 _admin_forward_re = re.compile("|".join(config.ADMIN_FORWARD_PATTERNS), re.IGNORECASE | re.DOTALL)
+_admin_relay_re = re.compile("|".join(config.ADMIN_RELAY_PATTERNS), re.IGNORECASE)
 
 scheduler = BackgroundScheduler()
 _app = None  # set in main()
@@ -464,6 +465,14 @@ def handle_message(event, client) -> None:
     # accidentally route through admin patterns. But check AFTER the admin-routing
     # block so admin commands still work during the planning window — done below.
 
+    # Deferred relay — "when ger logs in tell her to do X" — needs to come
+    # BEFORE the immediate forward / status checks because the trigger words
+    # overlap ("tell ger ..."). If we recognize a deferred-relay phrasing, we
+    # queue it instead of relaying right away.
+    if is_admin and _admin_relay_re.search(text):
+        if _handle_deferred_relay(user_id, text, client):
+            return
+
     if is_admin:
         # "what is X doing" / "status of X" / etc.
         m = _admin_status_re.search(text)
@@ -741,6 +750,16 @@ def handle_message(event, client) -> None:
             + plate_q
             + schedule_q,
             event_type="sam_welcome")
+
+        # Any deferred relays an admin queued for this worker get delivered
+        # right after the welcome. We send a SECOND DM so the relay reads
+        # as its own message, not buried in the schedule/plate ask.
+        try:
+            pending = sheets.list_pending_relays_for_worker(user_id)
+            if pending:
+                _deliver_relay(worker, pending, client)
+        except Exception:
+            log.exception("Relay delivery on login failed for %s", user_id)
         return
 
     ev_type = "help_request" if has_help(text) else "checkin"
@@ -790,6 +809,14 @@ def handle_message(event, client) -> None:
             if was_responding_to_prompt:
                 _dm(client, user_id, f"thanks for the update {first}! 🙌",
                     event_type="sam_chat_fallback")
+
+    # Cross-day relay completion: if an admin queued "tell ger to fix X" and
+    # ger now says "done with the listing", mark the relay done + DM the admin.
+    # Cheap early-out inside the helper if the worker has no delivered relays.
+    try:
+        _check_and_notify_relay_completion(worker, text, client)
+    except Exception:
+        log.exception("Relay completion check failed for %s", user_id)
 
     # --- Knowledge / follow-up handling ---
     # Knowledge extraction (saving URLs / tool answers from pending follow-ups)
@@ -1208,6 +1235,178 @@ def _handle_balance_query(user_id: str, client, worker: dict) -> None:
         lines.append(f"\n_note: {notes}_")
     lines.append("\nlet me know if you want to request time off and I'll route it to Jan.")
     _dm(client, user_id, "\n".join(lines), event_type="sam_balance_reply")
+
+
+def _handle_deferred_relay(admin_user_id: str, text: str, client) -> bool:
+    """Admin asked Sam to deliver a message to a worker the next time they
+    log in. Parse it, queue to Relay Queue, and if the worker is already
+    clocked in TODAY, deliver immediately.
+
+    Returns True if a relay was queued (so the caller stops further routing).
+    """
+    reload_roster()
+    roster = list(WORKERS.values())
+    parsed = analyzer.parse_relay_request(text, roster)
+    if not parsed:
+        # Gemini couldn't pin down a worker / task — let other handlers try.
+        return False
+
+    target_uid = parsed["slack_user_id"]
+    target = WORKERS.get(target_uid)
+    if not target:
+        # Sometimes the roster key has changed since Gemini parsed it; bail.
+        _dm(client, admin_user_id,
+            f"caught a 'when they log in' message but couldn't find {parsed.get('worker_name')} on the active roster — double-check the name?",
+            event_type="sam_relay_unmatched")
+        return True
+
+    # Managers can't relay to owners
+    is_owner = admin_user_id in config.OWNER_SLACK_IDS
+    is_manager = admin_user_id in config.MANAGER_SLACK_IDS
+    if is_manager and not is_owner and target_uid in config.OWNER_SLACK_IDS:
+        _dm(client, admin_user_id,
+            f"can't queue messages for {target['name'].split()[0]} — owner-level only.",
+            event_type="sam_relay_denied")
+        return True
+
+    import uuid
+    from datetime import datetime as _dt
+    relay_id = "r-" + uuid.uuid4().hex[:8]
+    now_iso = _dt.now(timezone.utc).isoformat(timespec="seconds")
+    sender_name = WORKERS[admin_user_id]["name"] if admin_user_id in WORKERS else admin_user_id
+
+    relay_row = [
+        relay_id, now_iso, sender_name, admin_user_id,
+        target["name"], target_uid,
+        parsed["message"], parsed.get("estimated_time", ""),
+        "pending", "", "", "", "",
+    ]
+    try:
+        sheets.append_relay(relay_row)
+    except Exception:
+        log.exception("Failed to queue relay")
+        _dm(client, admin_user_id, f"queue write failed — try again in a sec?",
+            event_type="sam_relay_queue_failed")
+        return True
+
+    first_target = target["name"].split()[0]
+    est_blurb = f" (~{parsed['estimated_time']})" if parsed.get("estimated_time") else ""
+
+    # If the worker is currently clocked in today, deliver right now instead of waiting.
+    today_local = _local_today(target)
+    already_on = LOGGED_IN_TODAY.get(target_uid) == today_local
+    if already_on:
+        try:
+            _deliver_relay(target, [{"Relay ID": relay_id, "Message": parsed["message"],
+                                       "Estimated Time": parsed.get("estimated_time", ""),
+                                       "From Name": sender_name}], client)
+            _dm(client, admin_user_id,
+                f"✓ {first_target} is already online — I sent it now{est_blurb}. I'll ping you when she confirms it's done.",
+                event_type="sam_relay_delivered_now")
+        except Exception:
+            log.exception("Immediate relay delivery failed for %s", target_uid)
+            _dm(client, admin_user_id,
+                f"queued for {first_target}, but the immediate delivery hit an error — it'll fall back to next login.",
+                event_type="sam_relay_partial")
+    else:
+        _dm(client, admin_user_id,
+            f"✓ got it — I'll tell {first_target} when she next logs in{est_blurb}. I'll ping you the moment she confirms it's done.",
+            event_type="sam_relay_queued")
+    return True
+
+
+def _deliver_relay(worker: dict, relays: list[dict], client) -> None:
+    """DM a worker about one or more pending relays at login. Marks each as
+    delivered on the Relay Queue tab. Best-effort — failures are logged but
+    don't block the rest of the welcome flow."""
+    if not relays:
+        return
+    first = worker["name"].split()[0]
+    user_id = worker["user_id"]
+    if len(relays) == 1:
+        r = relays[0]
+        msg = r.get("Message", "").strip()
+        est = (r.get("Estimated Time") or "").strip()
+        from_name = (r.get("From Name") or "").strip().split()[0] or "Jan"
+        est_blurb = f" (should only take ~{est})" if est else ""
+        body = (
+            f"hey {first} — quick one from {from_name} before you dive in:\n"
+            f"> {msg}{est_blurb}\n\n"
+            f"shoot me a message when you've handled it and I'll let {from_name} know."
+        )
+    else:
+        bullets = []
+        for r in relays:
+            msg = r.get("Message", "").strip()
+            est = (r.get("Estimated Time") or "").strip()
+            from_name = (r.get("From Name") or "").strip().split()[0] or "Jan"
+            suffix = f" (~{est})" if est else ""
+            bullets.append(f"• from {from_name}: {msg}{suffix}")
+        body = (
+            f"hey {first} — couple of things waiting for you:\n"
+            + "\n".join(bullets)
+            + "\n\nlet me know as you knock them out so I can update the requesters."
+        )
+    _dm(client, user_id, body, event_type="sam_relay_deliver")
+    for r in relays:
+        rid = r.get("Relay ID")
+        if rid:
+            try:
+                sheets.mark_relay_delivered(rid)
+            except Exception:
+                log.exception("mark_relay_delivered failed for %s", rid)
+
+
+def _check_and_notify_relay_completion(worker: dict, reply_text: str, client) -> None:
+    """After a worker replies, see if they're confirming any delivered relays
+    as done. For each completion, mark the row done and DM the requesting
+    admin with the worker's quote.
+
+    Cheap early-out: skip Gemini if the worker has no delivered relays.
+    """
+    if not reply_text or len(reply_text.strip()) < 4:
+        return
+    try:
+        open_relays = sheets.list_delivered_relays_for_worker(worker["user_id"])
+    except Exception:
+        log.exception("list_delivered_relays_for_worker failed")
+        return
+    if not open_relays:
+        return
+
+    try:
+        completions = analyzer.check_relay_completion(reply_text, open_relays)
+    except Exception:
+        log.exception("check_relay_completion failed")
+        return
+    if not completions:
+        return
+
+    relays_by_id = {r.get("Relay ID"): r for r in open_relays}
+    for comp in completions:
+        rid = comp["relay_id"]
+        relay = relays_by_id.get(rid)
+        if not relay:
+            continue
+        quote = comp.get("quote", "")
+        try:
+            sheets.mark_relay_done(rid, worker_reply=quote, notes="")
+        except Exception:
+            log.exception("mark_relay_done failed for %s", rid)
+            continue
+        # Notify the admin who requested it
+        admin_uid = (relay.get("From Slack ID") or "").strip()
+        if not admin_uid:
+            continue
+        worker_first = worker["name"].split()[0]
+        ask = (relay.get("Message") or "").strip()
+        quote_blurb = f"\n> {quote}" if quote else ""
+        try:
+            _dm(client, admin_uid,
+                f"✓ {worker_first} just confirmed: \"{ask}\"{quote_blurb}",
+                event_type="sam_relay_complete")
+        except Exception:
+            log.exception("Failed to notify admin of relay completion")
 
 
 def _latest_assignment_for(user_id: str) -> str | None:

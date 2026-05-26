@@ -677,6 +677,130 @@ Rules:
     return result
 
 
+def parse_relay_request(admin_text: str, roster: list[dict]) -> dict | None:
+    """Take an admin DM like 'when ger logs in tell her to fix the listing —
+    should only take 15 min' and return {worker_name, slack_user_id, message,
+    estimated_time}. Returns None if no actionable relay was found.
+
+    The intent regex in config.ADMIN_RELAY_PATTERNS catches the trigger; this
+    function does the structured extraction. Failsafe: returns None on error.
+    """
+    if not config.GOOGLE_API_KEY or not admin_text.strip():
+        return None
+
+    worker_lines = []
+    for w in roster:
+        nicks = (w.get("nicknames") or [])
+        nick_str = f" (aka: {', '.join(nicks)})" if nicks else ""
+        worker_lines.append(f"- {w['name']} [{w['user_id']}]{nick_str}")
+    roster_block = "\n".join(worker_lines)
+
+    prompt = f"""You're parsing an admin's request that should be relayed to a worker
+the next time the worker logs in (or right now if already online).
+
+KNOWN WORKERS (match against these — use EXACT full name + Slack ID in output):
+{roster_block}
+
+ADMIN'S MESSAGE:
+{admin_text.strip()}
+
+Extract the relay into JSON:
+{{
+  "worker_name": "<exact full name from the roster, or empty if no specific worker named>",
+  "slack_user_id": "<the matching Slack ID in brackets above, or empty>",
+  "message": "<the task/message to deliver to the worker, phrased as a direct ask, e.g. 'can you quickly fix the listing — should only take 15 min'>",
+  "estimated_time": "<time estimate if mentioned (e.g. '15 min', '1 hour'), else empty>"
+}}
+
+Rules:
+- Match nicknames/first names to full roster name (e.g. "ger" → "Ger Vargas").
+- The "message" should be a clean, direct request — strip out the "when X logs in" framing because Sam will deliver it AT login time. e.g. input "when ger logs in tell her to fix the listing, should only take 15 min" → message "can you fix the listing? should only take about 15 min".
+- Preserve any time estimate the admin mentioned ("15 min", "an hour", "quick task").
+- If no specific worker is named or you can't identify them, return empty strings.
+- Output ONLY the JSON. No prose.
+"""
+    try:
+        data = _gemini_json(prompt, max_tokens=512)
+    except Exception as e:
+        log.warning("Failed to parse relay request: %s", e)
+        return None
+
+    name = str(data.get("worker_name", "")).strip()
+    uid = str(data.get("slack_user_id", "")).strip()
+    msg = str(data.get("message", "")).strip()
+    est = str(data.get("estimated_time", "")).strip()
+    if not (name and uid and msg):
+        return None
+    return {
+        "worker_name": name,
+        "slack_user_id": uid,
+        "message": msg,
+        "estimated_time": est,
+    }
+
+
+def check_relay_completion(worker_reply: str, open_relays: list[dict]) -> list[dict]:
+    """Given a worker's incoming message and the list of relays delivered to
+    them that aren't yet done, return a list of {relay_id, completed: bool,
+    quote: str} for each relay the worker plausibly addressed. Empty list if
+    nothing matches.
+
+    Only flags relays where the worker is clearly indicating progress or
+    completion — vague acknowledgements like "ok thanks" don't count.
+    """
+    if not config.GOOGLE_API_KEY or not worker_reply.strip() or not open_relays:
+        return []
+
+    relay_lines = []
+    for r in open_relays:
+        rid = r.get("Relay ID", "")
+        msg = r.get("Message", "")
+        delivered = r.get("Date Delivered", "")
+        relay_lines.append(f"- ID={rid} | delivered {delivered} | ask: {msg}")
+    relay_block = "\n".join(relay_lines)
+
+    prompt = f"""A worker was given one or more ad-hoc tasks recently. They just sent
+this message. Determine which (if any) of the open tasks they're confirming as
+DONE or making meaningful progress on.
+
+OPEN TASKS (relays delivered to this worker, awaiting completion):
+{relay_block}
+
+WORKER'S NEW MESSAGE:
+{worker_reply.strip()}
+
+Output JSON:
+{{
+  "completed": [
+    {{"relay_id": "<ID from the list above>", "quote": "<short snippet from the worker's message that proves it's done>"}}
+  ]
+}}
+
+Rules:
+- Only include relays the worker actually mentioned doing / finishing / handling.
+- A vague "ok will do" or "thanks" does NOT count as completion — that's just acknowledgement.
+- A clear "done with the listing" / "sent it" / "fixed it" / "uploaded the file" DOES count.
+- If they say "still working on it" / "in progress" — do NOT mark as completed.
+- If nothing matches, return {{"completed": []}}.
+- Output ONLY the JSON.
+"""
+    try:
+        data = _gemini_json(prompt, max_tokens=512)
+    except Exception as e:
+        log.warning("check_relay_completion failed: %s", e)
+        return []
+
+    out: list[dict] = []
+    for item in (data.get("completed") or [])[:10]:
+        if not isinstance(item, dict):
+            continue
+        rid = str(item.get("relay_id", "")).strip()
+        quote = str(item.get("quote", "")).strip()
+        if rid:
+            out.append({"relay_id": rid, "quote": quote})
+    return out
+
+
 def generate_checkin_prompt(worker: dict, today_events: list[dict]) -> str | None:
     """Generate a contextual check-in DM that references the worker's recent
     activity. Returns None on failure so caller can fall back to generic prompt.

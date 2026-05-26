@@ -154,6 +154,11 @@ def main() -> None:
     commitments.update(values=[wt.COMMITMENTS_HEADER], range_name="A1", value_input_option="USER_ENTERED")
     _format_header(commitments, wt.COMMITMENTS_HEADER)
 
+    # Relay Queue — admin asks Sam to relay a message at next login ("when ger logs in tell her X")
+    relay = ss.add_worksheet(title=wt.RELAY_TAB, rows=500, cols=len(wt.RELAY_HEADER))
+    relay.update(values=[wt.RELAY_HEADER], range_name="A1", value_input_option="USER_ENTERED")
+    _format_header(relay, wt.RELAY_HEADER)
+
     # ---------------- PAYROLL SHEET (separate) ----------------
     payroll_id, ps = _create_sheet(drive, gc, args.payroll_title, folder_id, args.email)
     payroll_ws = ps.sheet1

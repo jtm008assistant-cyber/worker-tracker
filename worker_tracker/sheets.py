@@ -133,6 +133,114 @@ def append_commitment(row: List) -> None:
     ws.append_row(row, value_input_option="USER_ENTERED")
 
 
+# ---------------- Relay Queue ----------------
+
+def append_relay(row: List) -> None:
+    """Append a row to the Relay Queue tab."""
+    ws = open_tracker().worksheet(config.RELAY_TAB)
+    ws.append_row(row, value_input_option="USER_ENTERED")
+
+
+def _relay_rows() -> tuple[list[list[str]], list[str]]:
+    """Return (rows_including_header, header)."""
+    try:
+        ws = open_tracker().worksheet(config.RELAY_TAB)
+    except Exception:
+        return [], []
+    rows = ws.get_all_values()
+    if not rows:
+        return [], []
+    return rows, rows[0]
+
+
+def list_pending_relays_for_worker(slack_user_id: str) -> list[dict]:
+    """Relays addressed to this worker with status='pending' — i.e. not yet
+    delivered. Returned oldest-first."""
+    rows, header = _relay_rows()
+    if not rows:
+        return []
+    out: list[dict] = []
+    for r in rows[1:]:
+        rec = {header[i]: (r[i] if i < len(r) else "") for i in range(len(header))}
+        if rec.get("To Slack ID", "").strip() != slack_user_id:
+            continue
+        if (rec.get("Status") or "").strip().lower() != "pending":
+            continue
+        out.append(rec)
+    out.sort(key=lambda r: str(r.get("Date Created", "")))
+    return out
+
+
+def list_delivered_relays_for_worker(slack_user_id: str) -> list[dict]:
+    """Relays delivered to this worker but not yet completed/dropped — these
+    are the ones we'll watch for completion in the worker's next reply."""
+    rows, header = _relay_rows()
+    if not rows:
+        return []
+    out: list[dict] = []
+    for r in rows[1:]:
+        rec = {header[i]: (r[i] if i < len(r) else "") for i in range(len(header))}
+        if rec.get("To Slack ID", "").strip() != slack_user_id:
+            continue
+        if (rec.get("Status") or "").strip().lower() != "delivered":
+            continue
+        out.append(rec)
+    out.sort(key=lambda r: str(r.get("Date Created", "")))
+    return out
+
+
+def _update_relay_row_by_id(relay_id: str, updates: dict) -> bool:
+    """Find the row whose Relay ID matches and patch the columns in `updates`
+    (mapping of header name -> new value). Returns True on success."""
+    try:
+        ws = open_tracker().worksheet(config.RELAY_TAB)
+    except Exception:
+        return False
+    rows = ws.get_all_values()
+    if not rows:
+        return False
+    header = rows[0]
+    try:
+        id_col = header.index("Relay ID")
+    except ValueError:
+        return False
+    target = relay_id.strip()
+    for i, r in enumerate(rows[1:], start=2):
+        if len(r) > id_col and r[id_col].strip() == target:
+            for k, v in updates.items():
+                if k in header:
+                    ws.update_cell(i, header.index(k) + 1, v)
+            return True
+    return False
+
+
+def mark_relay_delivered(relay_id: str) -> bool:
+    today = datetime.now(timezone.utc).date().isoformat()
+    return _update_relay_row_by_id(relay_id, {
+        "Status": "delivered",
+        "Date Delivered": today,
+    })
+
+
+def mark_relay_done(relay_id: str, worker_reply: str = "", notes: str = "") -> bool:
+    today = datetime.now(timezone.utc).date().isoformat()
+    return _update_relay_row_by_id(relay_id, {
+        "Status": "done",
+        "Date Completed": today,
+        "Worker Reply": worker_reply or "",
+        "Notes": notes or "",
+    })
+
+
+def mark_relay_dropped(relay_id: str, notes: str = "") -> bool:
+    today = datetime.now(timezone.utc).date().isoformat()
+    return _update_relay_row_by_id(relay_id, {
+        "Status": "dropped",
+        "Date Completed": today,
+        "Notes": notes or "",
+    })
+
+
 def list_open_commitments(slack_user_id: str) -> list[dict]:
     """All open (not done/dropped) commitments for one worker, oldest first."""
     try:
