@@ -10,6 +10,7 @@ what they did + if they need help.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 from datetime import datetime, timezone, timedelta
@@ -688,6 +689,18 @@ def handle_message(event, client) -> None:
             return
 
     if is_eod(text):
+        # If they EOD while still on break, close the break first so we don't
+        # leave an orphan break_start in the log. The clock has been paused
+        # since they went on break, so we record the break end at "now" (the
+        # moment they EOD'd) with a note.
+        if user_id in ON_BREAK:
+            break_start_ts = ON_BREAK.pop(user_id)
+            duration_min = (datetime.now(timezone.utc) - break_start_ts).total_seconds() / 60
+            sheets.append_event(
+                worker["name"], user_id, "break_end",
+                f"break duration: {duration_min:.0f}min (auto-closed at EOD)",
+                worker["tz"],
+            )
         sheets.append_event(worker["name"], user_id, "eod", text, worker["tz"])
         try:
             scheduler.remove_job(f"prompt:{user_id}")
@@ -968,6 +981,130 @@ def restore_state() -> None:
                 schedule_next_prompt(user_id)
             log.info("Resumed active session for %s (on_break=%s)",
                      worker["name"], on_break_since is not None)
+
+
+def sweep_stale_breaks() -> None:
+    """Self-heal long-running break_start events with no matching break_end.
+
+    Scenarios this covers:
+      - Worker said 'Break' then EOD'd without saying 'back' (rare since we
+        now close at EOD too, but legacy data could still have orphans)
+      - Worker said 'Break', their machine died, never came back
+      - Sam was offline for the recovery message
+
+    Rule: if a break has been open for more than STALE_BREAK_HOURS (default 3h)
+    AND there's been no activity from that worker since the break_start, write
+    a break_end at the timestamp of the most recent activity event (or at
+    break_start + STALE_BREAK_HOURS, whichever is earlier — so we never credit
+    more than 3h of break time to a single pause).
+    """
+    STALE_BREAK_HOURS = float(os.environ.get("STALE_BREAK_HOURS", "3"))
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(hours=STALE_BREAK_HOURS)
+
+    try:
+        # Scan last 3 days to catch overnight orphans without reading the whole log
+        all_rows = sheets.activity_since(3)
+    except Exception:
+        log.exception("sweep_stale_breaks: failed to read activity")
+        return
+
+    # Group by worker
+    by_user: dict[str, list[dict]] = {}
+    for r in all_rows:
+        uid = str(r.get("Slack User ID", "")).strip()
+        if uid:
+            by_user.setdefault(uid, []).append(r)
+
+    closed = 0
+    for uid, rows in by_user.items():
+        rows.sort(key=lambda r: r.get("Timestamp UTC", ""))
+        # Find the most recent unclosed break_start across the 3-day window
+        open_break_ts: datetime | None = None
+        last_activity_ts: datetime | None = None
+        for r in rows:
+            t = r.get("Type", "")
+            try:
+                ts = datetime.fromisoformat(str(r.get("Timestamp UTC", "")))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if t in ("break_start",):
+                open_break_ts = ts
+                last_activity_ts = ts
+            elif t in ("break_end", "login", "eod"):
+                open_break_ts = None
+                last_activity_ts = ts
+            else:
+                # Any non-Sam, non-system event from the worker (checkin, help_request, etc.)
+                # counts as activity — they're back. If a break is still open, that's a bug
+                # we should heal: the next worker message after a break should have closed
+                # it, but if the regex missed and the user moved on, we cap the break here.
+                if not t.startswith("sam_") and t != "prompt_sent":
+                    if open_break_ts is not None:
+                        # User did something after break_start without explicit break_end —
+                        # treat the break as ending right before that activity.
+                        _retroactively_close_break(uid, open_break_ts, ts, reason="next-activity")
+                        closed += 1
+                        open_break_ts = None
+                    last_activity_ts = ts
+
+        # After processing rows, if a break is still open AND it's been longer
+        # than the stale threshold, close it.
+        if open_break_ts is not None and open_break_ts < cutoff:
+            # Cap at break_start + STALE_BREAK_HOURS so we don't credit huge breaks
+            cap = open_break_ts + timedelta(hours=STALE_BREAK_HOURS)
+            end_ts = min(last_activity_ts or cap, cap, now_utc)
+            if end_ts <= open_break_ts:
+                end_ts = open_break_ts + timedelta(minutes=1)
+            _retroactively_close_break(uid, open_break_ts, end_ts, reason="stale-sweep")
+            ON_BREAK.pop(uid, None)
+            closed += 1
+
+    if closed:
+        log.info("sweep_stale_breaks: auto-closed %d orphan break(s)", closed)
+
+
+def _retroactively_close_break(slack_user_id: str, start_ts: datetime,
+                                end_ts: datetime, reason: str) -> None:
+    """Write a backdated break_end event for an orphan break_start."""
+    worker = WORKERS.get(slack_user_id)
+    if not worker:
+        return
+    dur_min = (end_ts - start_ts).total_seconds() / 60
+    try:
+        tz = ZoneInfo(worker["tz"])
+    except Exception:
+        tz = ZoneInfo("UTC")
+    local = end_ts.astimezone(tz)
+    ws = sheets.open_tracker().worksheet(config.ACTIVITY_TAB)
+    ws.append_row(
+        [
+            end_ts.isoformat(timespec="seconds"),
+            local.date().isoformat(),
+            local.strftime("%H:%M:%S"),
+            worker["name"],
+            slack_user_id,
+            "break_end",
+            f"break duration: {dur_min:.0f}min (auto-closed: {reason})",
+        ],
+        value_input_option="USER_ENTERED",
+    )
+    log.info("Auto-closed break for %s (%s): %.0fmin", worker["name"], reason, dur_min)
+
+
+def schedule_stale_break_sweep() -> None:
+    """Run sweep_stale_breaks hourly so orphan breaks self-heal even if no one
+    triggers a recovery message."""
+    scheduler.add_job(
+        sweep_stale_breaks,
+        "interval",
+        hours=1,
+        id="stale_break_sweep",
+        next_run_time=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    log.info("Stale break sweeper scheduled (hourly)")
 
 
 def schedule_daily_digest() -> None:
@@ -1586,6 +1723,7 @@ def main() -> None:
     schedule_payroll()
     schedule_pre_payroll_reviews()
     schedule_daily_planning()
+    schedule_stale_break_sweep()
     log.info("Starting Socket Mode handler. Ctrl-C to stop.")
     SocketModeHandler(_app, config.SLACK_APP_TOKEN).start()
 
