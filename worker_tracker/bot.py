@@ -531,10 +531,8 @@ def handle_message(event, client) -> None:
         try:
             from . import report as _report
             result = _report.send_daily_digest()
-            ok_msg = (
-                f"✓ digest sent · workers={result['workers']} · "
-                f"email={'✓' if result['email'] else '✗'} · slack={'✓' if result['slack'] else '✗'}"
-            )
+            status = "✓" if result["slack"] else "✗"
+            ok_msg = f"{status} digest sent · {result['workers']} workers"
             if result.get("errors"):
                 ok_msg += "\n_errors:_\n" + "\n".join(f"  • {e}" for e in result["errors"])
             client.chat_postMessage(channel=user_id, text=ok_msg)

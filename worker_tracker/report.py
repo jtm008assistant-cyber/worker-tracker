@@ -431,7 +431,7 @@ def build_html(date_str: str, sections: List[dict]) -> str:
 
 def run_weekly_synthesis() -> None:
     """Rebuild every active worker's profile from the past 7 days of activity.
-    Sends a brief email summary of profile changes.
+    DMs a Slack summary of profile changes to all owners.
     """
     roster = sheets.load_roster()
     if not roster:
@@ -440,52 +440,74 @@ def run_weekly_synthesis() -> None:
 
     updated = []
     for w in roster:
-        prior = sheets.load_profile(w["user_id"])
-        recent_activity = sheets.activity_since(7, slack_user_id=w["user_id"])
-        first_seen = (prior or {}).get("First Seen") or (
-            min((r.get("Local Date") for r in recent_activity if r.get("Local Date")), default="")
-        )
-        # daily summaries for this worker over last 7 days
-        all_summaries = sheets.open_tracker().worksheet(config.SUMMARY_TAB).get_all_records()
-        recent_summaries = [
-            r for r in all_summaries
-            if r.get("Worker") == w["name"]
-        ][-7:]
+        try:
+            prior = sheets.load_profile(w["user_id"])
+            recent_activity = sheets.activity_since(7, slack_user_id=w["user_id"])
+            first_seen = (prior or {}).get("First Seen") or (
+                min((r.get("Local Date") for r in recent_activity if r.get("Local Date")), default="")
+            )
+            # daily summaries for this worker over last 7 days
+            all_summaries = sheets.open_tracker().worksheet(config.SUMMARY_TAB).get_all_records()
+            recent_summaries = [
+                r for r in all_summaries
+                if r.get("Worker") == w["name"]
+            ][-7:]
 
-        new_profile = analyzer.synthesize_weekly_profile(
-            name=w["name"],
-            slack_user_id=w["user_id"],
-            first_seen=first_seen,
-            prior_profile=prior,
-            recent_summaries=recent_summaries,
-            recent_activity=recent_activity,
-        )
-        sheets.upsert_profile(new_profile)
-        updated.append((w, prior, new_profile))
-        log.info("Updated profile for %s", w["name"])
+            new_profile = analyzer.synthesize_weekly_profile(
+                name=w["name"],
+                slack_user_id=w["user_id"],
+                first_seen=first_seen,
+                prior_profile=prior,
+                recent_summaries=recent_summaries,
+                recent_activity=recent_activity,
+            )
+            sheets.upsert_profile(new_profile)
+            updated.append((w, prior, new_profile))
+            log.info("Updated profile for %s", w["name"])
+        except Exception:
+            log.exception("Weekly synth failed for %s", w["name"])
 
-    if not config.GMAIL_USER or not config.GMAIL_APP_PASSWORD:
+    if not updated:
+        log.info("Weekly synth: no profiles updated, skipping digest")
         return
+
     today = datetime.now(ZoneInfo(config.MANAGER_TZ)).date().isoformat()
-    parts = [f"<h2 style='font-family:sans-serif'>Weekly Worker Profiles — {today}</h2>"]
+
+    # Build Slack-formatted weekly profile digest
+    lines = [f"*Weekly Worker Profiles — {today}*", ""]
     for w, prior, new in updated:
-        parts.append(
-            f"<div style='font-family:sans-serif;border-left:4px solid #1565c0;"
-            f"padding:8px 14px;margin:14px 0;background:#fafafa'>"
-            f"<h3 style='margin:0 0 4px 0'>{w['name']}</h3>"
-            f"<p style='margin:4px 0'><b>Role:</b> {new.get('Role / What They Do', '')}</p>"
-            f"<p style='margin:4px 0'><b>Recurring tasks:</b> {new.get('Recurring Tasks', '')}</p>"
-            f"<p style='margin:4px 0'><b>Strengths:</b> {new.get('Known Strengths', '')}</p>"
-            f"<p style='margin:4px 0'><b>Blockers / gaps:</b> {new.get('Known Blockers / Skill Gaps', '')}</p>"
-            f"<p style='margin:4px 0;color:#1565c0'><b>Open automation backlog:</b> {new.get('Automation Opportunities (Open)', '')}</p>"
-            f"<p style='margin:4px 0;color:#2e7d32'><b>Recently shipped:</b> {new.get('Automation Opportunities (Shipped)', '')}</p>"
-            f"<p style='margin:4px 0'><b>Patterns:</b> {new.get('Productivity Patterns', '')}</p>"
-            f"<p style='margin:4px 0;color:#ef6c00'><b>For you (coaching notes):</b> {new.get('Coaching Notes for Manager', '')}</p>"
-            f"</div>"
-        )
-    yag = yagmail.SMTP(config.GMAIL_USER, config.GMAIL_APP_PASSWORD)
-    yag.send(to=config.REPORT_RECIPIENT, subject=f"Weekly Worker Profiles — {today}", contents="".join(parts))
-    log.info("Sent weekly profile digest")
+        lines.append(f"*{w['name']}*")
+        role = new.get('Role / What They Do', '')[:200]
+        if role:
+            lines.append(f"  _role:_ {role}")
+        tasks = new.get('Recurring Tasks', '')[:300]
+        if tasks:
+            lines.append(f"  _recurring:_ {tasks}")
+        strengths = new.get('Known Strengths', '')[:200]
+        if strengths:
+            lines.append(f"  _strengths:_ {strengths}")
+        blockers = new.get('Known Blockers / Skill Gaps', '')[:200]
+        if blockers:
+            lines.append(f"  :warning: _blockers/gaps:_ {blockers}")
+        open_auto = new.get('Automation Opportunities (Open)', '')[:300]
+        if open_auto:
+            lines.append(f"  :gear: _open automation backlog:_ {open_auto}")
+        shipped = new.get('Automation Opportunities (Shipped)', '')[:200]
+        if shipped:
+            lines.append(f"  :white_check_mark: _shipped:_ {shipped}")
+        patterns = new.get('Productivity Patterns', '')[:200]
+        if patterns:
+            lines.append(f"  _patterns:_ {patterns}")
+        coaching = new.get('Coaching Notes for Manager', '')[:300]
+        if coaching:
+            lines.append(f"  :bulb: _for you:_ {coaching}")
+        lines.append("")
+
+    text = "\n".join(lines)
+    if not _send_slack_digest(text):
+        _notify_owners_of_failure(f"Weekly profile digest failed to ship on {today}")
+    else:
+        log.info("Sent weekly profile digest (Slack)")
 
 
 def _build_slack_digest_text(today_local: str, sections: list[dict]) -> str:
@@ -588,20 +610,20 @@ def _notify_owners_of_failure(error_msg: str) -> None:
 
 
 def send_daily_digest() -> dict:
-    """Build and ship today's EOD digest via BOTH Slack and email.
+    """Build and ship today's EOD digest as a Slack DM to all owners.
 
-    Bulletproof flow:
-      - Per-worker collect_worker_day() errors are caught — one bad worker
-        doesn't kill the whole digest. They show up in the report as 'ERROR'.
-      - If email fails, Slack still ships.
-      - If Slack fails, email still ships.
-      - If BOTH fail, Sam DMs the error to owners so we never miss silently.
+    Slack-only by design (Jan opted out of email — DMs are his primary
+    inbox). Bulletproof flow:
+      - Per-worker collect_worker_day() errors are caught — one bad
+        worker shows up in the digest as 'ERROR', the rest still ship.
+      - If Slack delivery fails, Sam DMs the failure error to owners
+        so we never have a silent miss day.
 
     Returns a dict with delivery status for debugging / manual triggers.
     """
     mgr_tz = ZoneInfo(config.MANAGER_TZ)
     today_local = datetime.now(mgr_tz).date().isoformat()
-    result = {"date": today_local, "workers": 0, "email": False, "slack": False, "errors": []}
+    result = {"date": today_local, "workers": 0, "slack": False, "errors": []}
 
     try:
         roster = sheets.load_roster()
@@ -635,36 +657,21 @@ def send_daily_digest() -> dict:
         sections.append(s)
     result["workers"] = len(sections)
 
-    # ---- Email ----
-    if not config.GMAIL_USER or not config.GMAIL_APP_PASSWORD:
-        log.warning("Gmail not configured; skipping email digest")
-        result["errors"].append("Gmail not configured (GMAIL_USER/GMAIL_APP_PASSWORD missing)")
-    else:
-        try:
-            html = build_html(today_local, sections)
-            yag = yagmail.SMTP(config.GMAIL_USER, config.GMAIL_APP_PASSWORD)
-            yag.send(to=config.REPORT_RECIPIENT, subject=f"Worker Tracker EOD — {today_local}", contents=html)
-            result["email"] = True
-            log.info("Sent EOD email digest to %s (%d workers)", config.REPORT_RECIPIENT, len(sections))
-        except Exception as e:
-            err = f"email send failed: {type(e).__name__}: {e}"
-            log.exception("EOD digest: %s", err)
-            result["errors"].append(err)
-
-    # ---- Slack ----
+    # ---- Slack delivery (sole channel) ----
     try:
         slack_text = _build_slack_digest_text(today_local, sections)
         if _send_slack_digest(slack_text):
             result["slack"] = True
+        else:
+            result["errors"].append("Slack send returned False (no OWNER_SLACK_IDS or all DMs failed)")
     except Exception as e:
         err = f"slack send failed: {type(e).__name__}: {e}"
         log.exception("EOD digest: %s", err)
         result["errors"].append(err)
 
-    # ---- Last resort ----
-    if not result["email"] and not result["slack"]:
+    if not result["slack"]:
         _notify_owners_of_failure(
-            f"All EOD delivery channels failed for {today_local}.\n"
+            f"EOD digest failed to send for {today_local}.\n"
             f"Errors:\n" + "\n".join(result["errors"])
         )
     return result
