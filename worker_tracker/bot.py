@@ -832,10 +832,17 @@ def handle_message(event, client) -> None:
         # knowledge base, time off, today's assignments, conversation history.
         try:
             if is_admin:
-                team_state = memory.build_admin_memory(
-                    user_id, list(WORKERS.values()), _worker_today_snapshot,
-                    message_text=text,
-                )
+                try:
+                    team_state = memory.build_admin_memory(
+                        user_id, list(WORKERS.values()), _worker_today_snapshot,
+                        message_text=text,
+                    )
+                except sheets.RateLimited:
+                    # Sheets exhausted AND no usable stale cache — answer
+                    # without team context rather than crash. Sam can still
+                    # have a useful conversation about general questions.
+                    log.warning("admin memory build rate-limited — replying without context")
+                    team_state = "(team data temporarily unavailable — Google Sheets is rate-limiting us)"
             else:
                 team_state = ""
             reply = analyzer.conversational_reply(

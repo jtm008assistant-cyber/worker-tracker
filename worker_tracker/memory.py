@@ -22,9 +22,13 @@ from . import config, sheets
 
 log = logging.getLogger(__name__)
 
-# (cache_key, build_time) -> rendered memory text
+# (cache_key, build_time) -> rendered memory text.
+# Bumped 30 → 120s. A burst of admin DMs in the same conversation now all hit
+# the same cached memory blob — building it requires reading 6+ tabs, so the
+# difference is dramatic. Caller already passes message_text into the cache
+# key, so a different worker mention reliably misses + rebuilds.
 _MEMORY_CACHE: dict[tuple, tuple[float, str]] = {}
-_CACHE_TTL_SECONDS = 30
+_CACHE_TTL_SECONDS = 120
 
 
 def _cached(key: tuple, ttl: int = _CACHE_TTL_SECONDS) -> Optional[str]:

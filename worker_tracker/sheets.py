@@ -79,13 +79,23 @@ _CACHE: dict[tuple, tuple[float, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 
 
-def _ttl_cache(seconds: float) -> Callable:
+_CACHE_STATS = {"hits": 0, "fresh_misses": 0, "stale_serves": 0, "errors": 0}
+
+
+def _ttl_cache(seconds: float, stale_seconds: float = 3600) -> Callable:
     """Decorator: cache the result of fn(*args, **kwargs) for `seconds`.
 
-    Args must be hashable. Used here to coalesce the constant hammering of
-    load_roster() / activity_rows() / all_profiles() that every handler does.
-    Bursts of admin DMs were costing us 20+ reads each — with this, the same
-    burst costs ~1.
+    Two-tier behavior:
+      - Within `seconds`: serve cached value, no API call. (Hit.)
+      - Between `seconds` and `stale_seconds`: try fresh fetch; if it
+        succeeds, replace cache. If it RAISES (RateLimited, APIError, etc.),
+        return the STALE cached value with a warning log. (Stale serve.)
+      - After `stale_seconds`: no fallback. Fresh fetch must succeed or
+        the exception propagates.
+
+    This means: even if Sheets API is fully exhausted, Sam keeps answering
+    with data up to 1 hour old instead of throwing — the user can keep
+    chatting through a quota event without ever seeing a crash.
     """
     def decorator(fn: Callable) -> Callable:
         @wraps(fn)
@@ -94,12 +104,30 @@ def _ttl_cache(seconds: float) -> Callable:
             now = time.monotonic()
             with _CACHE_LOCK:
                 hit = _CACHE.get(key)
-                if hit and (now - hit[0]) < seconds:
+            if hit and (now - hit[0]) < seconds:
+                _CACHE_STATS["hits"] += 1
+                return hit[1]
+            # Cache miss or stale — attempt a fresh fetch.
+            try:
+                val = fn(*args, **kwargs)
+                with _CACHE_LOCK:
+                    _CACHE[key] = (now, val)
+                _CACHE_STATS["fresh_misses"] += 1
+                return val
+            except Exception as e:
+                # Fresh fetch failed. If we have a stale-but-not-ancient cached
+                # value, serve it rather than crash. Especially useful when
+                # the failure is RateLimited (the whole point of this layer).
+                if hit and (now - hit[0]) < stale_seconds:
+                    _CACHE_STATS["stale_serves"] += 1
+                    age = now - hit[0]
+                    log.warning(
+                        "%s fresh fetch failed (%s: %s) — serving stale cache (age %.0fs)",
+                        fn.__name__, type(e).__name__, e, age,
+                    )
                     return hit[1]
-            val = fn(*args, **kwargs)
-            with _CACHE_LOCK:
-                _CACHE[key] = (now, val)
-            return val
+                _CACHE_STATS["errors"] += 1
+                raise
         # Expose an invalidator so write-paths can punch out stale entries.
         def _invalidate(*args, **kwargs) -> None:
             with _CACHE_LOCK:
@@ -114,6 +142,17 @@ def _ttl_cache(seconds: float) -> Callable:
         wrapper.invalidate = _invalidate  # type: ignore[attr-defined]
         return wrapper
     return decorator
+
+
+def cache_stats() -> dict:
+    """Snapshot of cache hit/miss/stale counters. Useful for logging or
+    diagnosing why we're hitting the API too often."""
+    total = sum(_CACHE_STATS.values())
+    return {
+        **_CACHE_STATS,
+        "total": total,
+        "hit_rate": (_CACHE_STATS["hits"] / total) if total else 0.0,
+    }
 
 
 def _creds() -> Credentials:
@@ -175,15 +214,15 @@ def append_event(worker_name: str, slack_user_id: str, event_type: str, message:
     )
 
 
-@_ttl_cache(seconds=60)
+@_ttl_cache(seconds=300)
 @_with_429_retry
 def load_roster() -> List[dict]:
-    """Active workers only. Returns [{name, user_id, email, tz, expected_start, expected_eod}].
+    """Active workers only.
 
-    Cached 60s — Roster changes infrequently (manual edits ~weekly) but
-    reload_roster() is called from 13+ places in bot.py, including at the
-    top of every scheduled handler. Without this we'd spend most of our
-    Sheets read budget re-reading the same tab.
+    Cached 5min (stale-tolerant up to 1h) — Roster is edited manually ~weekly,
+    so 5min is invisible to users. reload_roster() is called from 13+ places
+    in bot.py; without this, each scheduled handler's first read costs us a
+    full Sheets fetch. With this, ~1 read per 5min regardless of caller count.
     """
     ws = open_tracker().worksheet(config.ROSTER_TAB)
     rows = ws.get_all_records()
@@ -429,7 +468,7 @@ def mark_commitment_status(slack_user_id: str, commitment_text: str,
     return False
 
 
-@_ttl_cache(seconds=60)
+@_ttl_cache(seconds=300)
 @_with_429_retry
 def time_off_for_worker(slack_user_id: str, year: int | None = None) -> list[dict]:
     """Return all Time Off rows for one worker (optionally filtered to a specific year by Start Date).
@@ -481,15 +520,15 @@ def summaries_in_range(start_iso: str, end_iso: str, slack_user_id: str | None =
     return out
 
 
-@_ttl_cache(seconds=20)
+@_ttl_cache(seconds=60)
 @_with_429_retry
 def activity_rows(local_date_iso: str | None = None) -> List[dict]:
     """Read full Activity Log (or one day's worth).
 
-    Cached 20s — admin queries like 'is X working' / 'team status' / multiple
-    status pings in succession all hit this. Cache is invalidated by
-    append_event() so newly logged events appear immediately to the writer's
-    own subsequent reads.
+    Cached 60s (stale-tolerant 1h) — admin queries and the periodic
+    snapshot builder all hit this. Cache is invalidated by append_event()
+    so newly logged events appear immediately to *subsequent* reads.
+    Between unrelated handlers this is ~1 read/min instead of N.
     """
     ws = open_tracker().worksheet(config.ACTIVITY_TAB)
     rows = ws.get_all_records()
@@ -504,7 +543,7 @@ def append_summary(row: List) -> None:
     ws.append_row(row, value_input_option="USER_ENTERED")
 
 
-@_ttl_cache(seconds=60)
+@_ttl_cache(seconds=300)
 @_with_429_retry
 def load_profile(slack_user_id: str) -> dict | None:
     """Return the Worker Profile row for this user, or None if not yet created.
@@ -552,7 +591,7 @@ def upsert_profile(profile: dict) -> None:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
 
 
-@_ttl_cache(seconds=60)
+@_ttl_cache(seconds=300)
 @_with_429_retry
 def all_profiles() -> list[dict]:
     try:
@@ -562,7 +601,7 @@ def all_profiles() -> list[dict]:
     return ws.get_all_records()
 
 
-@_ttl_cache(seconds=60)
+@_ttl_cache(seconds=300)
 @_with_429_retry
 def list_worker_knowledge(slack_user_id: str) -> list[dict]:
     """Return all Processes & Tools entries for one worker. Cached 60s — written by
