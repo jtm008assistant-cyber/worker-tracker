@@ -753,6 +753,7 @@ def handle_message(event, client) -> None:
             if is_admin:
                 team_state = memory.build_admin_memory(
                     user_id, list(WORKERS.values()), _worker_today_snapshot,
+                    message_text=text,
                 )
             else:
                 team_state = ""

@@ -267,12 +267,212 @@ def _admin_convo_history(admin_user_id: str, limit: int = 20) -> str:
     return "\n".join(lines)
 
 
+# --- Deep dive on one worker ---
+
+def _worker_activity_history(slack_user_id: str, days: int = 60) -> str:
+    """Every raw event for one worker over the past N days. The full record:
+    every check-in message, every break, every login/EOD with timestamps."""
+    try:
+        rows = sheets.activity_since(days, slack_user_id=slack_user_id)
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    rows.sort(key=lambda r: r.get("Timestamp UTC", ""))
+    lines = [f"FULL ACTIVITY LOG (past {days} days, {len(rows)} events, chronological):"]
+    for r in rows[-400:]:  # cap at 400 events to keep token usage bounded
+        date = r.get("Local Date", "")
+        time_str = r.get("Local Time", "")
+        t = r.get("Type", "")
+        msg = (r.get("Message") or "").strip()
+        if msg:
+            lines.append(f"  [{date} {time_str}] {t}: {msg[:300]}")
+        else:
+            lines.append(f"  [{date} {time_str}] {t}")
+    return "\n".join(lines)
+
+
+def _worker_daily_summaries(worker_name: str, days: int = 60) -> str:
+    """All Daily Summary rows for one worker (AI-summarized days)."""
+    try:
+        ws = sheets.open_tracker().worksheet(config.SUMMARY_TAB)
+        rows = ws.get_all_records()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    today = datetime.now(ZoneInfo(config.MANAGER_TZ)).date()
+    cutoff = (today - timedelta(days=days)).isoformat()
+    relevant = [r for r in rows
+                if str(r.get("Worker", "")).strip() == worker_name
+                and str(r.get("Date", "")) >= cutoff]
+    if not relevant:
+        return ""
+    relevant.sort(key=lambda r: str(r.get("Date", "")))
+    lines = [f"DAILY SUMMARIES — past {days} days ({len(relevant)} days recorded):"]
+    for r in relevant:
+        date = r.get("Date", "")
+        hours = r.get("Active Hours", "")
+        checkins = r.get("Check-ins", "")
+        status = r.get("Status", "")
+        capacity = r.get("Capacity Signal", "")
+        notes = (r.get("Notes") or "").strip()
+        day_sum = (r.get("Day Summary") or "").strip()
+        autos = (r.get("Automation Ideas") or "").strip()
+        flags = (r.get("Manual Red Flags") or "").strip()
+        block = [f"- [{date}] {hours}h · {checkins} check-ins · {status} · capacity={capacity}"]
+        if notes:
+            block.append(f"    notes: {notes}")
+        if day_sum:
+            block.append(f"    summary: {day_sum}")
+        if autos:
+            block.append(f"    automation ideas: {autos}")
+        if flags:
+            block.append(f"    manual red flags: {flags}")
+        lines.append("\n".join(block))
+    return "\n".join(lines)
+
+
+def _worker_full_profile(worker_user_id: str, worker_name: str) -> str:
+    """The durable Worker Profile row, expanded."""
+    try:
+        p = sheets.load_profile(worker_user_id)
+    except Exception:
+        return ""
+    if not p:
+        return ""
+    lines = [f"WORKER PROFILE (durable, updated weekly by AI synthesizer):"]
+    for label, key in [
+        ("role / day-to-day", "Role / What They Do"),
+        ("recurring tasks", "Recurring Tasks"),
+        ("known strengths", "Known Strengths"),
+        ("known blockers / skill gaps", "Known Blockers / Skill Gaps"),
+        ("tools currently used", "Tools They Currently Use"),
+        ("automation opportunities (open)", "Automation Opportunities (Open)"),
+        ("automation opportunities (shipped)", "Automation Opportunities (Shipped)"),
+        ("productivity patterns", "Productivity Patterns"),
+        ("coaching notes for manager", "Coaching Notes for Manager"),
+        ("first seen", "First Seen"),
+        ("days tracked", "Days Tracked"),
+        ("last updated", "Last Updated"),
+    ]:
+        v = (p.get(key) or "").strip()
+        if v:
+            lines.append(f"  • {label}: {v}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _worker_knowledge(worker_user_id: str) -> str:
+    """All Processes & Tools entries for one worker."""
+    try:
+        items = sheets.list_worker_knowledge(worker_user_id)
+    except Exception:
+        return ""
+    if not items:
+        return ""
+    lines = [f"TOOLS & PROCESSES they've mentioned ({len(items)} items):"]
+    for it in items:
+        kind = (it.get("Kind") or "").strip()
+        name = (it.get("Name") or "").strip()
+        url = (it.get("URL") or "").strip()
+        desc = (it.get("Description") or "").strip()
+        steps = (it.get("Steps / Notes") or "").strip()
+        bit = f"  • {kind}: {name}"
+        if url:
+            bit += f" — {url}"
+        if desc:
+            bit += f"\n        what it is: {desc}"
+        if steps:
+            bit += f"\n        steps: {steps}"
+        lines.append(bit)
+    return "\n".join(lines)
+
+
+def _worker_time_off(slack_user_id: str) -> str:
+    """All Time Off entries for one worker."""
+    try:
+        items = sheets.time_off_for_worker(slack_user_id)
+    except Exception:
+        return ""
+    if not items:
+        return ""
+    items.sort(key=lambda r: str(r.get("Start Date", "")))
+    lines = [f"TIME OFF HISTORY ({len(items)} entries):"]
+    for r in items:
+        lines.append(f"  • {r.get('Type')} {r.get('Start Date')}"
+                     + (f" → {r.get('End Date')}" if r.get('End Date') and r.get('End Date') != r.get('Start Date') else "")
+                     + f" ({r.get('Days')} days, {r.get('Status')}, logged by {r.get('Logged By')})")
+    return "\n".join(lines)
+
+
+def build_worker_deep_dive(worker: dict, days: int = 60) -> str:
+    """Build a comprehensive dossier on one worker — everything Sam has tracked."""
+    name = worker.get("name", "")
+    uid = worker.get("user_id", "")
+    sections = [f"=== DEEP DIVE ON {name} (past {days} days) ===",
+                f"Roster info: {worker.get('tz', 'UTC')}, {worker.get('pay_type', 'hourly')},"
+                f" cadence={worker.get('checkin_interval_min', 120)}min"
+                + (f", schedule {worker.get('expected_start', '')}-{worker.get('expected_eod', '')}"
+                   if worker.get('expected_start') else "")]
+    for builder in [
+        lambda: _worker_full_profile(uid, name),
+        lambda: _worker_daily_summaries(name, days),
+        lambda: _worker_knowledge(uid),
+        lambda: _worker_time_off(uid),
+        lambda: _worker_activity_history(uid, days),
+    ]:
+        try:
+            s = builder()
+            if s:
+                sections.append(s)
+        except Exception:
+            log.exception("deep dive section failed")
+    return "\n\n".join(sections)
+
+
+def detect_mentioned_workers(text: str, workers: list[dict], limit: int = 3) -> list[dict]:
+    """Scan a message for any worker name/first-name/nickname. Returns up to `limit`
+    workers that the message references. Used to load deep dives when an admin
+    asks about specific people."""
+    text_lower = " " + text.lower() + " "
+    hits: list[dict] = []
+    for w in workers:
+        if w["user_id"] in config.OWNER_SLACK_IDS:
+            continue
+        candidates: list[str] = []
+        candidates.append(w["name"].lower())
+        first = w["name"].split()[0].lower()
+        candidates.append(first)
+        for n in (w.get("nicknames") or []):
+            candidates.append(n.lower())
+        # Match on word boundaries — " hannah " matches but "hannahs" doesn't
+        for c in candidates:
+            if not c:
+                continue
+            if f" {c} " in text_lower or f" {c}'" in text_lower or f" {c}?" in text_lower or f" {c}." in text_lower or f" {c}," in text_lower:
+                if w not in hits:
+                    hits.append(w)
+                break
+    return hits[:limit]
+
+
 # --- Master builder ---
 
 def build_admin_memory(admin_user_id: str, workers: list[dict],
-                       today_snapshot_fn) -> str:
-    """Build a rich memory block for an admin chat. Cached 30 seconds per admin."""
-    cache_key = ("admin_memory", admin_user_id)
+                       today_snapshot_fn,
+                       message_text: str = "") -> str:
+    """Build a rich memory block for an admin chat. Cached 30 seconds per admin.
+
+    If `message_text` mentions specific workers by name/nickname, append a
+    DEEP DIVE on each of them (all activity, daily summaries, profile,
+    knowledge, time off — past 60 days). So 'what does Rey do' becomes a
+    real answer instead of a guess.
+    """
+    # Include the deep-dive workers in the cache key so two different admin
+    # queries about different workers don't collide on the same cached blob
+    focused = detect_mentioned_workers(message_text or "", workers, limit=3) if message_text else []
+    focused_ids = tuple(sorted(w["user_id"] for w in focused))
+    cache_key = ("admin_memory", admin_user_id, focused_ids)
     cached = _cached(cache_key)
     if cached:
         return cached
@@ -320,6 +520,16 @@ def build_admin_memory(admin_user_id: str, workers: list[dict],
             sections.append(s)
     except Exception:
         log.exception("convo history section failed")
+
+    # If the admin's message references specific workers by name, append a full
+    # deep dive on each one. This is where the depth comes from.
+    for w in focused:
+        try:
+            dd = build_worker_deep_dive(w, days=60)
+            if dd:
+                sections.append(dd)
+        except Exception:
+            log.exception("deep dive failed for %s", w.get("name"))
 
     result = "\n\n".join(sections) if sections else "(no team data available yet)"
     _put(cache_key, result)
