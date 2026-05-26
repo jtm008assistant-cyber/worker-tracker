@@ -309,10 +309,26 @@ ASK IF the worker referenced any of these and it's NOT in their known list:
 - An integration/automation/CLI/script
 - A platform or marketplace (Amazon Seller Central, Walmart, ShipStation)
 
-ALWAYS ask BOTH name and purpose in one question — what it is AND what
-they use it for. So the saved entry captures both. Example:
-"quick one — what's Flow and what do you use it for? drop a link if
-there is one, I'll remember it for next time."
+ASK in the form of a statement of intent — Sam is tracking the team's
+workflow, not asking permission. Always anchor to the CURRENT task they
+just mentioned (so workers feel heard, not interrogated about random
+tools out of context).
+
+ALWAYS pair the name AND the purpose AND anchor it to "for this task" /
+"in your workflow" — so the question reads as a workflow-mapping
+question, not a permission ask.
+
+GOOD examples (declarative, anchored, captures name + purpose):
+- "quick one — what's Flow and what do you use it for in this task? i want to understand it as part of your workflow."
+- "what do you do in Amazon Seller Central typically for this task? i want to understand that's part of your workflow."
+- "what's the lead sheet and what's it for? drop the link if there is one — i want to keep a record of the sheets you use day to day."
+- "what does the morning audit involve? i want to map out the steps so i know what 'morning audit' means going forward."
+
+BAD examples (avoid — these ask permission or feel like interrogation):
+- "want me to remember that?" (asks permission)
+- "is it ok if i save this?" (asks permission)
+- "tell me about Flow" (vague, no anchor)
+- "what tools do you use?" (open-ended, not anchored to the task)
 
 DO NOT ASK IF:
 - Already in the known list (no point re-asking)
@@ -321,8 +337,8 @@ DO NOT ASK IF:
 - A purely generic verb with no proper noun ("did some work", "wrote some emails")
   — no specific tool to ask about
 
-The follow-up must be short (<= 30 words), lowercase, friendly, written in
-Sam's voice. Always pair the name AND the purpose in your question.
+The follow-up must be short (<= 35 words), lowercase, friendly, written in
+Sam's voice. Always pair name + purpose + workflow anchor.
 
 Worker: {name}
 Their check-in: "{message.strip()}"
