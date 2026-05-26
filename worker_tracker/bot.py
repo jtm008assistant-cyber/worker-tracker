@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import config, sheets, report, analyzer, payroll, worker_views, onboarding
+from . import config, sheets, report, analyzer, payroll, worker_views, onboarding, memory
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("slack_bolt").setLevel(logging.WARNING)
@@ -747,10 +747,15 @@ def handle_message(event, client) -> None:
         # specific command. If they were responding to Sam's periodic check-in
         # prompt, ALWAYS acknowledge — even a simple 'thanks for the update' so
         # they know Sam saw it. Otherwise respect Gemini's SKIP judgment.
-        # For admins, also include current team state so Sam can answer
-        # follow-up questions about specific workers.
+        # For admins, Sam gets FULL memory: current state, 7d activity, profiles,
+        # knowledge base, time off, today's assignments, conversation history.
         try:
-            team_state = _build_team_state_for_admin() if is_admin else ""
+            if is_admin:
+                team_state = memory.build_admin_memory(
+                    user_id, list(WORKERS.values()), _worker_today_snapshot,
+                )
+            else:
+                team_state = ""
             reply = analyzer.conversational_reply(
                 message=text,
                 speaker_name=worker["name"],
