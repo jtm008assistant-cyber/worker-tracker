@@ -1394,6 +1394,7 @@ def _handle_balance_query(user_id: str, client, worker: dict) -> None:
     allocations = {
         "vacation": int(worker.get("vacation_days_year") or 0),
         "sick": int(worker.get("sick_days_year") or 0),
+        "holiday": int(worker.get("holiday_days_year") or 0),
         "pto": int(worker.get("pto_days_year") or 0),
     }
     if sum(allocations.values()) == 0 and not (worker.get("benefits_notes") or "").strip():
@@ -1414,7 +1415,7 @@ def _handle_balance_query(user_id: str, client, worker: dict) -> None:
 
     notes = worker.get("benefits_notes") or ""
     lines = [f"hey {first}, here's your {year} balance:"]
-    for kind in ("vacation", "sick", "pto"):
+    for kind in ("vacation", "sick", "holiday", "pto"):
         alloc = allocations.get(kind, 0)
         u = used.get(kind, 0)
         if alloc or u:

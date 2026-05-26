@@ -82,7 +82,8 @@ ROSTER_HEADER = [
     "Pay Type", "Hourly Rate", "Salary (per period)", "Currency",
     "Overtime Threshold (h/wk)", "Overtime Multiplier",
     "Check-in Frequency (min)", "Personal View Sheet URL", "Nicknames",
-    "Vacation Days/Year", "Sick Days/Year", "PTO Days/Year", "Benefits Notes",
+    "Vacation Days/Year", "Sick Days/Year", "Holiday Days/Year",
+    "PTO Days/Year", "Benefits Notes",
 ]
 ACTIVITY_HEADER = ["Timestamp UTC", "Local Date", "Local Time", "Worker", "Slack User ID", "Type", "Message"]
 SUMMARY_HEADER = [

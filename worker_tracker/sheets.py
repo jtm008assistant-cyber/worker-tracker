@@ -115,6 +115,7 @@ def load_roster() -> List[dict]:
             ],
             "vacation_days_year": _f("Vacation Days/Year"),
             "sick_days_year": _f("Sick Days/Year"),
+            "holiday_days_year": _f("Holiday Days/Year"),
             "pto_days_year": _f("PTO Days/Year"),
             "benefits_notes": str(r.get("Benefits Notes", "")).strip(),
         })
