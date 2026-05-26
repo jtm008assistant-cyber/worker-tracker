@@ -292,26 +292,37 @@ def maybe_ask_followup(name: str, message: str, knowledge: list[dict],
     knowledge_block = _knowledge_block(knowledge)
     already_str = ", ".join(already_asked_today) if already_asked_today else "(nothing yet)"
 
-    prompt = f"""You are Sam — an AI assistant on a small team. After a worker sends
-a check-in message, you decide whether to ask ONE quick follow-up question
-to learn about an unfamiliar tool, sheet, doc, process, or workflow they
-just mentioned.
+    prompt = f"""You are Sam — an AI assistant on a small team building a deep
+knowledge base of each worker's tools/software/process stack. After a worker
+sends a check-in message, you decide whether to ask ONE follow-up question
+to capture a tool/software/process you haven't logged yet.
 
-ASK IF: the worker mentioned a tool/sheet/doc/process by name (or with an
-ambiguous reference like "the tracker", "the system", "that doc") that is
-NOT already in their known list. Knowing it would help future check-ins
-make sense.
+BE CURIOUS. Err on the side of asking. The goal is to build a complete
+picture of every software/tool/sheet/process each worker uses in their
+day-to-day. If they mention a name you haven't catalogued, ASK.
+
+ASK IF the worker referenced any of these and it's NOT in their known list:
+- Software/SaaS by name (Notion, Airtable, Loom, Flow, Canva, Shopify, etc.)
+- Internal tools or apps (the "tracker", "the dashboard", "the CMS")
+- A specific sheet/doc/file (their lead sheet, the pricing doc)
+- A named process or workflow ("the onboarding flow", "Q3 audit", "review process")
+- An integration/automation/CLI/script
+- A platform or marketplace (Amazon Seller Central, Walmart, ShipStation)
+
+ALWAYS ask BOTH name and purpose in one question — what it is AND what
+they use it for. So the saved entry captures both. Example:
+"quick one — what's Flow and what do you use it for? drop a link if
+there is one, I'll remember it for next time."
 
 DO NOT ASK IF:
-- Already in the known list
-- Already asked about it today (see "already asked today" below)
-- Casual / personal (food, mood, family, weather)
-- Just normal task description with no specific tool/process name
-- You'd be asking for the sake of asking
+- Already in the known list (no point re-asking)
+- Already asked about it today (see list below)
+- Just casual / personal (food, mood, family, weather)
+- A purely generic verb with no proper noun ("did some work", "wrote some emails")
+  — no specific tool to ask about
 
-The follow-up must be short (<= 25 words), lowercase, friendly, written in
-Sam's voice. Example: "quick one — what's the tracker sheet? drop a link
-if there is one, I'll remember for next time".
+The follow-up must be short (<= 30 words), lowercase, friendly, written in
+Sam's voice. Always pair the name AND the purpose in your question.
 
 Worker: {name}
 Their check-in: "{message.strip()}"
@@ -323,7 +334,7 @@ Already asked about today: {already_str}
 Respond as JSON ONLY:
 {{
   "ask": "the follow-up message text, or null if nothing worth asking",
-  "topic": "1-3 word label of what the question is about (e.g. 'tracker sheet'), or null"
+  "topic": "1-3 word label of what the question is about (e.g. 'flow software', 'lead sheet', 'walmart case process'), or null"
 }}
 """
     try:
@@ -359,8 +370,10 @@ def extract_knowledge_from_reply(name: str, reply_text: str, asked_topic: str | 
     existing_names = [k.get("Name", "") for k in existing_knowledge if k.get("Name")]
     existing_str = ", ".join(existing_names) if existing_names else "(none)"
 
-    prompt = f"""Extract any tools, sheets, docs, processes, workflows, or projects
-the worker referenced in their message. Output structured data.
+    prompt = f"""Extract any tools, software, sheets, docs, processes, workflows, or
+projects the worker referenced in their message. Capture both NAME and PURPOSE
+(what the worker uses it for) — the description field is the most important
+piece because it's how Sam will explain this tool/process to other admins later.
 
 Worker: {name}
 Their message: "{reply_text.strip()}"
@@ -372,10 +385,10 @@ Respond as JSON ONLY:
 {{
   "items": [
     {{
-      "kind": "tool|sheet|doc|process|workflow|project",
+      "kind": "software|tool|sheet|doc|process|workflow|project|integration|platform",
       "name": "concise human-readable name",
-      "url": "URL (use one from the detected URLs if relevant) or empty",
-      "description": "1-2 sentences in plain English",
+      "url": "URL if mentioned (use one from the detected URLs if relevant) or empty",
+      "description": "1-2 sentences in plain English: what it is AND what this worker uses it for",
       "steps": "optional — bullet list for processes, otherwise empty"
     }}
   ]
@@ -384,10 +397,17 @@ Respond as JSON ONLY:
 Rules:
 - Only output things genuinely referenced in their message. Don't invent.
 - Max 3 items per call.
-- For URLs that look like Google Sheets, set kind=sheet; Docs → doc;
-  Notion/Linear/Asana → tool.
-- If they didn't actually answer the question (e.g. just said "ok"),
-  return {{"items": []}}.
+- "kind" guidance:
+    software = a third-party app (Notion, Airtable, Loom, Flow, Canva, Shopify)
+    tool     = internal/custom tools, scripts, integrations
+    sheet    = Google Sheets URL
+    doc      = Google Doc / Notion page / similar
+    process  = a named workflow ('Q3 audit', 'customer review process')
+    platform = a marketplace ('Amazon Seller Central', 'Walmart Seller')
+- DESCRIPTION must answer: what is it + what does THIS worker use it for.
+  e.g. "Flow — video editing app. Hannah uses it to make product videos
+  for the team's YouTube channel."
+- If they didn't actually answer (e.g. just said "ok"), return {{"items": []}}.
 - Output ONLY the JSON.
 """
     try:

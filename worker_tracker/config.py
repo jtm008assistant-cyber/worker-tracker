@@ -116,10 +116,12 @@ LIBRARY_HEADER = [
     "Total References", "First Seen", "Last Updated",
 ]
 
-# How aggressively Sam asks follow-up questions when workers mention unfamiliar things
-MAX_FOLLOWUPS_PER_DAY = int(os.environ.get("MAX_FOLLOWUPS_PER_DAY", "2"))
+# How aggressively Sam asks follow-up questions when workers mention unfamiliar
+# tools/software/processes. Higher = more curious Sam. Default tuned to ask
+# about every distinct new tool while not overwhelming workers.
+MAX_FOLLOWUPS_PER_DAY = int(os.environ.get("MAX_FOLLOWUPS_PER_DAY", "5"))
 # Minimum minutes between follow-ups to the same worker
-FOLLOWUP_COOLDOWN_MINUTES = int(os.environ.get("FOLLOWUP_COOLDOWN_MINUTES", "60"))
+FOLLOWUP_COOLDOWN_MINUTES = int(os.environ.get("FOLLOWUP_COOLDOWN_MINUTES", "15"))
 
 WEEKLY_SYNTHESIS_DOW = int(os.environ.get("WEEKLY_SYNTHESIS_DOW", "6"))  # 0=Mon, 6=Sun
 WEEKLY_SYNTHESIS_TIME = os.environ.get("WEEKLY_SYNTHESIS_TIME", "21:00")
