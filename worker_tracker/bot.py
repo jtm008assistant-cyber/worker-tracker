@@ -469,6 +469,9 @@ def handle_message(event, client) -> None:
     today = _local_today(worker)
     first = worker["name"].split()[0] if worker["name"] else "you"
 
+    # Capture whether this message is a direct reply to Sam's periodic prompt.
+    # If yes, ALWAYS acknowledge (silence after asking a question = rude).
+    was_responding_to_prompt = user_id in PROMPT_PENDING
     PROMPT_PENDING.pop(user_id, None)
     try:
         scheduler.remove_job(f"miss:{user_id}")
@@ -612,8 +615,10 @@ def handle_message(event, client) -> None:
             "noted — flagging this for the manager. drop more detail if you need it sooner.",
             event_type="sam_help_ack")
     else:
-        # Everyone — admins AND workers — gets a real conversational reply for
-        # things that didn't match a specific command. Different prompts per role.
+        # Everyone gets a real conversational reply for messages that didn't match a
+        # specific command. If they were responding to Sam's periodic check-in
+        # prompt, ALWAYS acknowledge — even a simple 'thanks for the update' so
+        # they know Sam saw it. Otherwise respect Gemini's SKIP judgment.
         try:
             reply = analyzer.conversational_reply(
                 message=text,
@@ -622,10 +627,17 @@ def handle_message(event, client) -> None:
                 is_manager=is_manager and not is_owner,
                 is_worker=not (is_owner or is_manager),
             )
+            if not reply and was_responding_to_prompt:
+                # Gemini SKIPped but we MUST ack — fallback canned thanks
+                reply = f"thanks for the update {first}! 🙌"
             if reply:
                 _dm(client, user_id, reply, event_type="sam_chat")
         except Exception:
             log.exception("conversational reply failed for %s", worker["name"])
+            # On exception during prompt-reply, fall back to canned ack so Sam isn't silent
+            if was_responding_to_prompt:
+                _dm(client, user_id, f"thanks for the update {first}! 🙌",
+                    event_type="sam_chat_fallback")
 
     # --- Knowledge / follow-up handling ---
     try:
