@@ -362,6 +362,26 @@ TEAM_WIDE_PRONOUNS = frozenset({
 })
 
 
+TASK_LIST_WORKER_PATTERNS = (
+    # Worker asks Sam to show their own task list / checklist
+    r"\b(?:my|whats? my|show my|see my|view my|list my)\s+(?:tasks?|list|checklist|todo|to[\s-]?do|plate|queue|things)\b",
+    r"\b(?:what'?s\s+on\s+my)\s+(?:plate|list|checklist|todo|to[\s-]?do)\b",
+    r"\bwhat\s+(?:do\s+i\s+have|am\s+i\s+(?:doing|working\s+on))\b",
+    r"\b(?:show|give)\s+me\s+(?:my|the)\s+(?:tasks?|list|checklist|todo)\b",
+    r"^(?:tasks?|todo|to[\s-]?do|checklist|my list)\s*\??\s*$",
+)
+
+TASK_LIST_ADMIN_PATTERNS = (
+    # Admin asks Sam for a worker's task list
+    r"\b(?:tasks?|list|checklist|todo|to[\s-]?do|plate|queue)\s+(?:for|of)\s+([A-Za-z][\w'.-]{0,30})\b",
+    r"\b([A-Za-z][\w'.-]{0,30}?)(?:'s|s)\s+(?:tasks?|list|checklist|todo|to[\s-]?do|plate|queue)\b",
+    r"\bwhat(?:'s| is| are)?\s+(?:on\s+)?([A-Za-z][\w'.-]{0,30}?)(?:'s|s)?\s+(?:plate|list|checklist|todo)\b",
+    r"\bshow\s+(?:me\s+)?([A-Za-z][\w'.-]{0,30}?)(?:'s|s)?\s+(?:tasks?|list|checklist|todo)\b",
+    # Bare name followed by a task word — "rey checklist", "hannah todo"
+    r"\b([A-Za-z][\w'.-]{0,30}?)\s+(?:tasks?|list|checklist|todo|to[\s-]?do)\b",
+)
+
+
 ADMIN_DIGEST_NOW_PATTERNS = (
     # "send the EOD digest" / "EOD report now" / "give me today's digest" / "run digest"
     r"\b(?:send|run|trigger|give me|gimme)\s+(?:the\s+|today'?s\s+)?(?:eod|EOD|daily)\s+(?:report|digest|summary)\b",

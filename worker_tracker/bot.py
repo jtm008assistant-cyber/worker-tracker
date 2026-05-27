@@ -41,6 +41,8 @@ _admin_forward_re = re.compile("|".join(config.ADMIN_FORWARD_PATTERNS), re.IGNOR
 _admin_relay_re = re.compile("|".join(config.ADMIN_RELAY_PATTERNS), re.IGNORECASE)
 _admin_digest_now_re = re.compile("|".join(config.ADMIN_DIGEST_NOW_PATTERNS), re.IGNORECASE)
 _admin_team_status_re = re.compile("|".join(config.ADMIN_TEAM_STATUS_PATTERNS), re.IGNORECASE)
+_task_list_worker_re = re.compile("|".join(config.TASK_LIST_WORKER_PATTERNS), re.IGNORECASE)
+_task_list_admin_re = re.compile("|".join(config.TASK_LIST_ADMIN_PATTERNS), re.IGNORECASE)
 
 scheduler = BackgroundScheduler()
 _app = None  # set in main()
@@ -255,6 +257,114 @@ def _worker_today_snapshot(worker: dict) -> dict:
         "hours_so_far_today": hours_so_far,
         "today_checkins": today_checkins,
     }
+
+
+def _format_task_list(worker: dict, audience: str = "worker") -> str:
+    """Return a clean checklist DM for one worker.
+
+    Combines two sources:
+      - Relay Queue: tasks sent by an admin via 'send to X' or 'when X
+        logs in'. Status pending → delivered → done.
+      - Commitments: things the worker self-promised in check-ins
+        ('I'll have X done by 3pm'). Status open → done/dropped.
+
+    audience='worker' frames it as "your tasks". audience='admin' frames
+    it as "Hannah's tasks". Same content, different pronouns.
+    """
+    from datetime import datetime as _dt
+    name = worker["name"]
+    first = name.split()[0]
+    uid = worker["user_id"]
+
+    try:
+        pending = sheets.list_pending_relays_for_worker(uid)
+    except Exception:
+        log.exception("list_pending_relays_for_worker failed for %s", uid)
+        pending = []
+    try:
+        delivered = sheets.list_delivered_relays_for_worker(uid)
+    except Exception:
+        log.exception("list_delivered_relays_for_worker failed for %s", uid)
+        delivered = []
+    try:
+        commits = sheets.list_open_commitments(uid)
+    except Exception:
+        log.exception("list_open_commitments failed for %s", uid)
+        commits = []
+
+    def _age_days(date_str: str) -> int | None:
+        if not date_str:
+            return None
+        try:
+            d = _dt.fromisoformat(date_str.split("T")[0]).date()
+            return (_dt.now(timezone.utc).date() - d).days
+        except Exception:
+            return None
+
+    if not (pending or delivered or commits):
+        if audience == "worker":
+            return (
+                f"you have nothing on your list right now {first} — clean slate 🌱\n"
+                f"any task an admin sends, or anything you commit to in check-ins, "
+                f"will show up here."
+            )
+        else:
+            return f"*{name}* — nothing open. clean slate 🌱"
+
+    lines: list[str] = []
+    if audience == "worker":
+        lines.append(f"here's what's on your plate, {first}:")
+    else:
+        lines.append(f"*{name}'s tasks:*")
+    lines.append("")
+
+    # Delivered relays (already sent to worker, awaiting completion)
+    if delivered:
+        lines.append("*active (admin sent, you've seen):*")
+        for i, r in enumerate(delivered, 1):
+            msg = (r.get("Message") or "").strip()
+            sender = (r.get("From Name") or "").strip()
+            age = _age_days(r.get("Date Delivered", ""))
+            age_str = f" · {age}d ago" if age and age > 0 else " · today"
+            lines.append(f"  {i}. {msg[:180]}")
+            lines.append(f"     _from {sender}{age_str}_")
+        lines.append("")
+
+    # Pending relays (queued, not delivered yet — only show to admins)
+    if pending and audience == "admin":
+        lines.append("*queued (will deliver next login):*")
+        for i, r in enumerate(pending, 1):
+            msg = (r.get("Message") or "").strip()
+            sender = (r.get("From Name") or "").strip()
+            age = _age_days(r.get("Date Created", ""))
+            age_str = f" · queued {age}d ago" if age and age > 0 else " · queued today"
+            lines.append(f"  {i}. {msg[:180]}")
+            lines.append(f"     _from {sender}{age_str}_")
+        lines.append("")
+
+    # Open commitments (self-made promises in check-ins)
+    if commits:
+        if audience == "worker":
+            lines.append("*things you said you'd do:*")
+        else:
+            lines.append("*self-made commitments:*")
+        for i, c in enumerate(commits, 1):
+            text = (c.get("Commitment") or "").strip()
+            age = _age_days(c.get("Date Created", ""))
+            age_str = f" · {age}d ago" if age and age > 0 else " · today"
+            due = (c.get("Due By") or "").strip()
+            due_str = f" · due {due}" if due else ""
+            lines.append(f"  {i}. {text[:180]}")
+            lines.append(f"     _committed{age_str}{due_str}_")
+        lines.append("")
+
+    if audience == "worker":
+        lines.append("_just tell me when something's done — i'll mark it off automatically. "
+                     "or say 'done with <the thing>' to be explicit._")
+    else:
+        lines.append("_send a new task: 'tell {first} to <thing>' or 'send {first} this: <thing>'._".format(first=first.lower()))
+
+    return "\n".join(lines)
 
 
 def _format_team_status() -> str:
@@ -642,6 +752,37 @@ def handle_message(event, client) -> None:
                 pass
         return
 
+    # Admin asks "tasks for hannah" / "ger's list" / "what's on rey's plate"
+    # Checked BEFORE team-status so "what's on rey's plate" doesn't get
+    # eaten by a broader pattern.
+    if is_admin and _task_list_admin_re.search(text):
+        m = _task_list_admin_re.search(text)
+        query = next((g for g in m.groups() if g), "").strip()
+        # Strip trailing filler so "hannah's" cleans to "hannah"
+        query = re.sub(r"[''`]s$", "", query, flags=re.IGNORECASE).strip()
+        if query.lower() in config.TEAM_WIDE_PRONOUNS:
+            # "team list" / "everyone's tasks" — fall through to other handlers
+            pass
+        else:
+            matches = _find_worker_by_name(query)
+            if not matches:
+                client.chat_postMessage(channel=user_id, text=f"don't know anyone named '{query}' on the roster — try just their first name?")
+                return
+            if len(matches) > 1:
+                names = ", ".join(w["name"] for w in matches)
+                client.chat_postMessage(channel=user_id, text=f"multiple matches for '{query}': {names}. be more specific?")
+                return
+            target = matches[0]
+            if is_manager and not is_owner and target["user_id"] in config.OWNER_SLACK_IDS:
+                client.chat_postMessage(channel=user_id, text=f"sorry, can't share that with you 🙅 owner-level only.")
+                return
+            try:
+                client.chat_postMessage(channel=user_id, text=_format_task_list(target, audience="admin"))
+            except Exception as e:
+                log.exception("admin task list failed")
+                client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+            return
+
     # Team-wide status: "did everyone log in", "who's working", "team status",
     # "is anyone on break". Checked BEFORE per-worker so "everyone" / "the team"
     # don't get mis-parsed as a worker name (the bug Jan flagged at 8:48 PM).
@@ -778,6 +919,22 @@ def handle_message(event, client) -> None:
     if _timeoff_balance_query_re.search(text):
         _handle_balance_query(user_id, client, worker)
         return
+
+    # Worker (or admin asking about their own) checklist: "my tasks",
+    # "what's on my list", "my todo", etc. Shows their own pending +
+    # active + commitments.
+    if _task_list_worker_re.search(text):
+        # Need a worker dict for the user — owners might also ask this
+        # about themselves but we treat them as 'admin' audience for own.
+        target = WORKERS.get(user_id)
+        if target:
+            audience = "admin" if is_admin else "worker"
+            try:
+                client.chat_postMessage(channel=user_id, text=_format_task_list(target, audience=audience))
+            except Exception as e:
+                log.exception("worker task list failed")
+                client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+            return
 
     # 'introduce everyone' — owners only (managers can't broadcast intros)
     if is_owner and _admin_intro_re.search(text):
