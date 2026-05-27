@@ -114,13 +114,19 @@ def _extract_json_object(text: str) -> dict | None:
 
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=2, max=10))
-def _gemini_json(prompt: str, max_tokens: int = 2048) -> dict:
+def _gemini_json(prompt: str, max_tokens: int = 4096) -> dict:
     """Run a Gemini call expecting JSON output. Robust to:
       - Markdown code fences around the JSON
       - Embedded newlines / control chars in strings (json.loads strict=False)
       - Truncation mid-string at max_output_tokens (salvage parser closes
         the last valid pair and trims the rest)
       - Prose preamble before the {...} block (extracts first balanced object)
+
+    Default max_tokens bumped 2048 → 4096 because Gemini 2.5 Flash uses
+    "thinking" tokens that count against the budget even though they
+    don't show in the response. Most JSON output is <200 chars but the
+    model can eat 1-3K tokens on reasoning. 4096 leaves comfortable
+    headroom for both.
     """
     client = genai.Client(api_key=config.GOOGLE_API_KEY)
     resp = client.models.generate_content(
@@ -475,12 +481,10 @@ Respond as JSON ONLY:
 }}
 """
     try:
-        # Bumped 512 → 1024. The full prompt is ~3000 chars; with the old
-        # 512-token ceiling Gemini was getting cut off mid-string in the
-        # "ask" field, breaking JSON parse, and silently returning None
-        # for every single follow-up call. 1024 gives comfortable headroom
-        # for the 35-word ask + the topic field + any JSON whitespace.
-        data = _gemini_json(prompt, max_tokens=1024)
+        # 4096 — Gemini 2.5 Flash thinking tokens eat budget. Previous
+        # 512 then 1024 both still got truncated mid-string. 4096 is the
+        # standard everywhere now.
+        data = _gemini_json(prompt, max_tokens=4096)
     except Exception as e:
         log.warning("Follow-up generation failed for %s: %s", name, e)
         return None
@@ -805,7 +809,8 @@ Rules:
 - Output ONLY the JSON. No prose.
 """
     try:
-        data = _gemini_json(prompt, max_tokens=512)
+        # 4096 — see _gemini_json docstring re: thinking tokens.
+        data = _gemini_json(prompt, max_tokens=4096)
     except Exception as e:
         log.warning("Failed to parse relay request: %s", e)
         return None
@@ -1017,10 +1022,9 @@ Be CONSERVATIVE: if you're not sure, return "other". If the message is just
 "hey" or "how's it going" — return "other" (it's just chat, not a query).
 """
     try:
-        # Bumped 256 → 512. With 256 Gemini was emitting prose preamble
-        # ("Here is the JSON requested:") and running out of tokens BEFORE
-        # the actual JSON. 512 ensures any preamble + the 60-char JSON fits.
-        data = _gemini_json(prompt, max_tokens=512)
+        # 4096 — Gemini 2.5 Flash thinking tokens eat budget. See
+        # _gemini_json docstring.
+        data = _gemini_json(prompt, max_tokens=4096)
     except Exception as e:
         log.warning("classify_admin_intent failed: %s", e)
         return None

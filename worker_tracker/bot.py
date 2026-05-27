@@ -953,7 +953,15 @@ def handle_message(event, client) -> None:
             event_type="sam_discrepancy_ack")
         # Don't return — also treat as a normal check-in (it's still activity)
 
-    if LOGGED_IN_TODAY.get(user_id) != today:
+    # OWNERS NEVER get auto-clocked-in. They're in the roster for team-status
+    # display + admin permission checks, not as tracked workers. If Jan DMs
+    # Sam a question or a relay request, treat it as admin chat — never as
+    # a "first message of the day = login" trigger. This prevents the bug
+    # where Jan typed "give this link when ger logs in..." and Sam replied
+    # with the new-worker login welcome instead of queuing the relay.
+    if user_id in config.OWNER_SLACK_IDS:
+        pass  # skip login path entirely for owners
+    elif LOGGED_IN_TODAY.get(user_id) != today:
         LOGGED_IN_TODAY[user_id] = today
         sheets.append_event(worker["name"], user_id, "login", text, worker["tz"])
         schedule_next_prompt(user_id)
