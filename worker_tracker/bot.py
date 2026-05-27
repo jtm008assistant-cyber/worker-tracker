@@ -44,6 +44,7 @@ _admin_team_status_re = re.compile("|".join(config.ADMIN_TEAM_STATUS_PATTERNS), 
 _task_list_worker_re = re.compile("|".join(config.TASK_LIST_WORKER_PATTERNS), re.IGNORECASE)
 _task_list_admin_re = re.compile("|".join(config.TASK_LIST_ADMIN_PATTERNS), re.IGNORECASE)
 _automation_review_re = re.compile("|".join(config.AUTOMATION_REVIEW_PATTERNS), re.IGNORECASE)
+_admin_learned_re = re.compile("|".join(config.ADMIN_LEARNED_PATTERNS), re.IGNORECASE)
 
 scheduler = BackgroundScheduler()
 _app = None  # set in main()
@@ -258,6 +259,120 @@ def _worker_today_snapshot(worker: dict) -> dict:
         "hours_so_far_today": hours_so_far,
         "today_checkins": today_checkins,
     }
+
+
+def _format_learned_today() -> str:
+    """Summarize what Sam captured from team check-ins today.
+
+    Pulls:
+      - Knowledge Base entries first-mentioned OR last-updated today
+      - Today's substantive worker check-ins (>=20 chars) grouped per worker
+      - New commitments logged today
+    Returns a Slack-formatted DM.
+    """
+    from datetime import datetime as _dt
+    mgr_tz = ZoneInfo(config.MANAGER_TZ)
+    today_local = _dt.now(mgr_tz).date().isoformat()
+    sections: list[str] = [f"*what i picked up today — {today_local}*", ""]
+
+    # 1. Knowledge Base additions today (across all workers)
+    new_kb: list[tuple[str, dict]] = []
+    for w in WORKERS.values():
+        if w["user_id"] in config.OWNER_SLACK_IDS:
+            continue
+        try:
+            kb = sheets.list_worker_knowledge(w["user_id"])
+        except Exception:
+            continue
+        for k in kb:
+            first = (k.get("First Mentioned") or "").strip()[:10]
+            last = (k.get("Last Updated") or "").strip()[:10]
+            if first == today_local or last == today_local:
+                new_kb.append((w["name"], k))
+
+    if new_kb:
+        sections.append("*new knowledge captured:*")
+        for worker_name, k in new_kb:
+            kind = (k.get("Kind") or "").strip()
+            name = (k.get("Name") or "").strip()
+            desc = (k.get("Description") or "").strip()
+            url = (k.get("URL") or "").strip()
+            kind_emoji = {
+                "software": ":computer:", "tool": ":wrench:",
+                "sheet": ":bar_chart:", "doc": ":page_facing_up:",
+                "process": ":repeat:", "workflow": ":repeat:",
+                "platform": ":globe_with_meridians:",
+                "person": ":bust_in_silhouette:", "link": ":link:",
+                "job": ":briefcase:", "compliance": ":scales:",
+            }.get(kind.lower(), ":small_blue_diamond:")
+            line = f"  {kind_emoji} *{name}* ({worker_name.split()[0]}, {kind})"
+            sections.append(line)
+            if desc:
+                sections.append(f"      {desc[:240]}")
+            if url:
+                sections.append(f"      _link: {url[:120]}_")
+        sections.append("")
+    else:
+        sections.append("_no new knowledge base entries today._")
+        sections.append("")
+
+    # 2. Today's substantive worker activity (>=30 chars per check-in)
+    try:
+        all_today = sheets.activity_rows(today_local)
+    except Exception:
+        all_today = []
+    by_worker: dict[str, list[str]] = {}
+    for r in all_today:
+        if r.get("Type") not in ("checkin", "help_request"):
+            continue
+        uid = (r.get("Slack User ID") or "").strip()
+        if uid in config.OWNER_SLACK_IDS:
+            continue
+        msg = (r.get("Message") or "").strip()
+        if len(msg) < 30:
+            continue
+        worker_name = (r.get("Worker") or "").strip()
+        by_worker.setdefault(worker_name, []).append(msg[:200])
+
+    if by_worker:
+        sections.append("*what workers said today:*")
+        for wname, msgs in by_worker.items():
+            first = wname.split()[0] if wname else "worker"
+            sections.append(f"  *{first}*")
+            # Cap to 3 messages per worker so the DM stays scannable
+            for m in msgs[:3]:
+                sections.append(f"    • {m}")
+            if len(msgs) > 3:
+                sections.append(f"    _+{len(msgs) - 3} more check-ins_")
+        sections.append("")
+    else:
+        sections.append("_no substantive check-ins today (workers either offline or low-content updates)._")
+        sections.append("")
+
+    # 3. New commitments today
+    commits_today: list[tuple[str, str]] = []
+    for w in WORKERS.values():
+        if w["user_id"] in config.OWNER_SLACK_IDS:
+            continue
+        try:
+            cs = sheets.list_open_commitments(w["user_id"])
+        except Exception:
+            cs = []
+        for c in cs:
+            created = (c.get("Date Created") or "").strip()[:10]
+            if created == today_local:
+                commits_today.append((w["name"].split()[0], (c.get("Commitment") or "").strip()))
+    if commits_today:
+        sections.append("*new commitments logged:*")
+        for wname, text_ in commits_today:
+            sections.append(f"  • {wname}: {text_[:180]}")
+        sections.append("")
+
+    sections.append(
+        "_ask 'what can we automate' to see ranked automation candidates from "
+        "the knowledge base, or 'team status' for current state._"
+    )
+    return "\n".join(sections)
 
 
 def _format_task_list(worker: dict, audience: str = "worker") -> str:
@@ -751,6 +866,16 @@ def handle_message(event, client) -> None:
                 client.chat_postMessage(channel=user_id, text=f"digest blew up: {e}")
             except Exception:
                 pass
+        return
+
+    # "what did you learn today" / "what's new" — summarize what Sam
+    # captured from team check-ins today (KB additions + key activities).
+    if is_admin and _admin_learned_re.search(text):
+        try:
+            client.chat_postMessage(channel=user_id, text=_format_learned_today())
+        except Exception as e:
+            log.exception("learned-today summary failed")
+            client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
         return
 
     # Admin asks "what can we automate" / "automation candidates" /

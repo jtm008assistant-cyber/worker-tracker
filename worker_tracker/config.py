@@ -382,6 +382,19 @@ TASK_LIST_ADMIN_PATTERNS = (
 )
 
 
+ADMIN_LEARNED_PATTERNS = (
+    # Admin asks "what did you learn today" / "what did you find out" /
+    # "what's new" — wants a summary of what Sam captured from check-ins
+    # today: new KB entries, key worker activities, anything noteworthy.
+    r"\bwhat\s+(?:did|have|d')\s*(?:you|u)\s+(?:learn|learned|find\s+out|discover|pick\s+up|capture|note)\b",
+    r"\bwhat'?s\s+new\b",
+    r"\banything\s+(?:new|noteworthy|interesting)\s+(?:today|this\s+(?:week|morning))\b",
+    r"\bwhat\s+have\s+you\s+(?:figured\s+out|noticed|caught|seen)\s+(?:today|this\s+week)?\b",
+    r"\b(?:today'?s|this\s+week'?s)\s+(?:learnings?|takeaways?|highlights?|notes?)\b",
+    r"\bany\s+new\s+(?:tools?|info|details?|signals?|stuff)\b",
+)
+
+
 AUTOMATION_REVIEW_PATTERNS = (
     # Admin asks "what should we automate" / "automation candidates" / "what can we automate for hannah"
     r"\b(?:what|which|show me|list)\s+(?:should|could|can)\s+(?:we|i)\s+automate\b",
