@@ -1107,6 +1107,43 @@ def handle_message(event, client) -> None:
     # BEFORE the immediate forward / status checks because the trigger words
     # overlap ("tell ger ..."). If we recognize a deferred-relay phrasing, we
     # queue it instead of relaying right away.
+    # 'send to X: message' / 'tell norks his hours look off' — explicit
+    # forward command. Checked BEFORE the looser relay/status patterns so
+    # an unambiguous "tell X ..." doesn't get hijacked by a permissive
+    # "is X on" status regex finding "is" later in the message body.
+    # (The bug Jan flagged where "tell Norks. ... is a test from jan. if he
+    # waitin on seeddance" got parsed as the worker name "a test from
+    # jan. if he waitin".)
+    if is_admin:
+        fm = _admin_forward_re.match(text)
+        if fm:
+            groups = [g for g in fm.groups() if g]
+            if len(groups) >= 2:
+                target_query = groups[0].strip().rstrip(".,:;-")
+                message_to_send = groups[1].strip()
+                matches = _find_worker_by_name(target_query)
+                if not matches:
+                    client.chat_postMessage(channel=user_id, text=f"don't know who '{target_query}' is — check the roster?")
+                    return
+                if len(matches) > 1:
+                    names = ", ".join(w["name"] for w in matches)
+                    client.chat_postMessage(channel=user_id, text=f"multiple matches for '{target_query}': {names}. be more specific?")
+                    return
+                target = matches[0]
+                if is_manager and not is_owner and target["user_id"] in config.OWNER_SLACK_IDS:
+                    client.chat_postMessage(channel=user_id, text=f"can't relay messages to {target['name'].split()[0]} — owner-level only.")
+                    return
+                try:
+                    sender_name = WORKERS[user_id]["name"] if user_id in WORKERS else user_id
+                    client.chat_postMessage(channel=target["user_id"], text=message_to_send)
+                    sheets.append_event(target["name"], target["user_id"], "admin_forward",
+                                       f"from {sender_name}: {message_to_send[:100]}", target["tz"])
+                    client.chat_postMessage(channel=user_id, text=f"✓ sent to {target['name']}")
+                except Exception as e:
+                    log.exception("admin forward failed")
+                    client.chat_postMessage(channel=user_id, text=f"failed to send: {e}")
+                return
+
     if is_admin and _admin_relay_re.search(text):
         if _handle_deferred_relay(user_id, text, client):
             return
@@ -1302,38 +1339,6 @@ def handle_message(event, client) -> None:
                 log.exception("status snapshot failed for %s", target["name"])
                 client.chat_postMessage(channel=user_id, text=f"hit an error checking on {target['name']}: {e}")
             return
-    # 'send to X: message' / 'tell norks his hours look off' — admin relay
-    if is_admin:
-        fm = _admin_forward_re.match(text)
-        if fm:
-            groups = [g for g in fm.groups() if g]
-            if len(groups) >= 2:
-                target_query = groups[0].strip()
-                message_to_send = groups[1].strip()
-                matches = _find_worker_by_name(target_query)
-                if not matches:
-                    client.chat_postMessage(channel=user_id, text=f"don't know who '{target_query}' is — check the roster?")
-                    return
-                if len(matches) > 1:
-                    names = ", ".join(w["name"] for w in matches)
-                    client.chat_postMessage(channel=user_id, text=f"multiple matches for '{target_query}': {names}. be more specific?")
-                    return
-                target = matches[0]
-                # Managers can't relay to owners
-                if is_manager and not is_owner and target["user_id"] in config.OWNER_SLACK_IDS:
-                    client.chat_postMessage(channel=user_id, text=f"can't relay messages to {target['name'].split()[0]} — owner-level only.")
-                    return
-                try:
-                    sender_name = WORKERS[user_id]["name"] if user_id in WORKERS else user_id
-                    client.chat_postMessage(channel=target["user_id"], text=message_to_send)
-                    sheets.append_event(target["name"], target["user_id"], "admin_forward",
-                                       f"from {sender_name}: {message_to_send[:100]}", target["tz"])
-                    client.chat_postMessage(channel=user_id, text=f"✓ sent to {target['name']}")
-                except Exception as e:
-                    log.exception("admin forward failed")
-                    client.chat_postMessage(channel=user_id, text=f"failed to send: {e}")
-                return
-
     # Planning reply — if we asked this person the planning question and they
     # didn't match an admin command above, treat their message as the answer.
     if _handle_planning_reply(user_id, text, client):
