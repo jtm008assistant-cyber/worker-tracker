@@ -43,6 +43,7 @@ _admin_digest_now_re = re.compile("|".join(config.ADMIN_DIGEST_NOW_PATTERNS), re
 _admin_team_status_re = re.compile("|".join(config.ADMIN_TEAM_STATUS_PATTERNS), re.IGNORECASE)
 _task_list_worker_re = re.compile("|".join(config.TASK_LIST_WORKER_PATTERNS), re.IGNORECASE)
 _task_list_admin_re = re.compile("|".join(config.TASK_LIST_ADMIN_PATTERNS), re.IGNORECASE)
+_automation_review_re = re.compile("|".join(config.AUTOMATION_REVIEW_PATTERNS), re.IGNORECASE)
 
 scheduler = BackgroundScheduler()
 _app = None  # set in main()
@@ -750,6 +751,56 @@ def handle_message(event, client) -> None:
                 client.chat_postMessage(channel=user_id, text=f"digest blew up: {e}")
             except Exception:
                 pass
+        return
+
+    # Admin asks "what can we automate" / "automation candidates" /
+    # "automation for hannah". Pulls the relevant slice of the Knowledge
+    # Base and ranks tasks via Gemini for automation leverage.
+    if is_admin and _automation_review_re.search(text):
+        m = _automation_review_re.search(text)
+        # If a worker name was captured, scope to that worker; else team-wide
+        captured = next((g for g in (m.groups() if m else []) if g), "") or ""
+        captured = captured.strip()
+        target = None
+        if captured and captured.lower() not in config.TEAM_WIDE_PRONOUNS:
+            matches = _find_worker_by_name(captured)
+            if matches and len(matches) == 1:
+                target = matches[0]
+        try:
+            client.chat_postMessage(channel=user_id, text="digging through the knowledge base… 🤖 give me a sec.")
+            from . import analyzer as _ana
+            if target:
+                kb = sheets.list_worker_knowledge(target["user_id"])
+                scope = target["name"].split()[0]
+            else:
+                # Whole-team scope: aggregate every worker's KB
+                kb = []
+                for w in WORKERS.values():
+                    if w["user_id"] in config.OWNER_SLACK_IDS:
+                        continue
+                    try:
+                        kb.extend(sheets.list_worker_knowledge(w["user_id"]))
+                    except Exception:
+                        log.exception("kb load failed for %s", w["name"])
+                scope = "the team"
+            if not kb:
+                client.chat_postMessage(channel=user_id, text=(
+                    f"nothing in the knowledge base for {scope} yet — i need a few more days of "
+                    f"check-ins to gather process detail. once workers describe their recurring "
+                    f"tasks i can identify automation candidates."
+                ))
+                return
+            report_md = _ana.rank_automation_candidates(kb, scope_label=scope)
+            if report_md:
+                client.chat_postMessage(channel=user_id, text=report_md)
+            else:
+                client.chat_postMessage(channel=user_id, text=(
+                    f"checked {len(kb)} entries for {scope} but couldn't pull a clean ranking "
+                    f"this round — maybe try again in a bit."
+                ))
+        except Exception as e:
+            log.exception("automation review failed")
+            client.chat_postMessage(channel=user_id, text=f"hit an error generating the automation review: {e}")
         return
 
     # Admin asks "tasks for hannah" / "ger's list" / "what's on rey's plate"

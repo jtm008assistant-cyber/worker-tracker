@@ -382,6 +382,17 @@ TASK_LIST_ADMIN_PATTERNS = (
 )
 
 
+AUTOMATION_REVIEW_PATTERNS = (
+    # Admin asks "what should we automate" / "automation candidates" / "what can we automate for hannah"
+    r"\b(?:what|which|show me|list)\s+(?:should|could|can)\s+(?:we|i)\s+automate\b",
+    r"\bautomation\s+(?:candidates?|opportunities|ideas?|review|targets?)\b",
+    r"\b(?:candidates?|opportunities|ideas?|targets?)\s+(?:to|for)\s+automate\b",
+    r"\bwhat\s+(?:is|are)\s+(?:ripe|good)\s+(?:for|to)\s+automat(?:e|ion)\b",
+    r"\bautomation\s+(?:for|of)\s+([A-Za-z][\w'.-]{0,30})\b",
+    r"\bwhat\s+can\s+(?:we|i)\s+automate\s+(?:for\s+)?([A-Za-z][\w'.-]{0,30})\b",
+)
+
+
 ADMIN_DIGEST_NOW_PATTERNS = (
     # "send the EOD digest" / "EOD report now" / "give me today's digest" / "run digest"
     r"\b(?:send|run|trigger|give me|gimme)\s+(?:the\s+|today'?s\s+)?(?:eod|EOD|daily)\s+(?:report|digest|summary)\b",

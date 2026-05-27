@@ -406,10 +406,18 @@ def _knowledge_block(knowledge: list[dict]) -> str:
 def maybe_ask_followup(name: str, message: str, knowledge: list[dict],
                        already_asked_today: list[str]) -> dict | None:
     """Decide whether to ask a follow-up question about something the worker
-    mentioned. Returns {"ask": str, "topic": str} or None.
+    mentioned, OR to deepen our understanding of a task we've already started
+    capturing. Returns {"ask": str, "topic": str} or None.
 
-    The bot should only ask when something genuinely new is mentioned that
-    would be useful to capture in the knowledge base. NOT for every check-in.
+    PRIMARY GOAL: gather enough detail on each worker's recurring tasks that
+    in 2-3 weeks an admin can pick the highest-value processes to automate.
+    That means depth per task — name + tools + steps + frequency + time
+    + judgment vs. rote — not just one-shot mentions.
+
+    Strategy: prefer DEEPENING an existing knowledge entry that's still
+    missing automation-relevant detail (steps / frequency / time / judgment)
+    over starting a brand new topic. Only ask about new content when every
+    existing entry has enough depth to evaluate for automation.
     """
     if not config.GOOGLE_API_KEY:
         return None
@@ -419,11 +427,53 @@ def maybe_ask_followup(name: str, message: str, knowledge: list[dict],
     knowledge_block = _knowledge_block(knowledge)
     already_str = ", ".join(already_asked_today) if already_asked_today else "(nothing yet)"
 
+    # Flag entries that are still missing automation-relevant depth. We pass
+    # this to Gemini so it knows which entries to prefer deepening over
+    # starting a new topic.
+    incomplete: list[str] = []
+    for k in knowledge:
+        desc = (k.get("Description") or "").strip()
+        steps = (k.get("Steps / Notes") or "").strip()
+        name_k = (k.get("Name") or "").strip()
+        kind = (k.get("Kind") or "").strip().lower()
+        if not name_k:
+            continue
+        if kind in ("job", "process", "workflow"):
+            # For jobs/processes we want: steps, frequency, time, judgment
+            missing = []
+            if not steps:
+                missing.append("steps")
+            joined = (desc + " " + steps).lower()
+            if "daily" not in joined and "weekly" not in joined and "month" not in joined \
+                    and "every" not in joined and "times a" not in joined:
+                missing.append("frequency")
+            if "min" not in joined and "hour" not in joined and "takes" not in joined:
+                missing.append("time-per-run")
+            if "rote" not in joined and "judgment" not in joined and "decide" not in joined \
+                    and "automated" not in joined and "manual" not in joined:
+                missing.append("rote-vs-judgment")
+            if missing:
+                incomplete.append(f"'{name_k}' (kind={kind}) is missing: {', '.join(missing)}")
+    incomplete_block = ("\n".join(f"  - {x}" for x in incomplete)
+                        if incomplete else "  (everything we have is fully mapped)")
+
     prompt = f"""You are Sam — building a deep map of how every worker on this small
-team gets their work done. Tools they use, sheets they reference, people they
-coordinate with, links they share, jobs they handle. After a worker sends a
-check-in, you decide whether to ask ONE follow-up question to capture
-something you haven't logged yet.
+team gets their work done so that in 2-3 WEEKS an admin can look at the
+Knowledge Base and identify the highest-leverage processes to AUTOMATE.
+
+That goal shapes every question you ask. It is not enough to log that a
+worker "uses CapCut" — you need to know:
+  * STEPS: what's the workflow from start to finish, in order
+  * FREQUENCY: how often (daily / 2x/week / monthly / ad-hoc)
+  * TIME PER RUN: how long does one execution take
+  * JUDGMENT vs. ROTE: which parts require real thinking vs. mechanical
+    copy/paste/format that a script could do
+  * INPUTS & OUTPUTS: what does the task start with, what does it produce
+
+You don't get all this in one question. You drill in over MULTIPLE
+check-ins. Each follow-up should fill the NEXT missing piece for a task
+already partly captured, OR start mapping a brand-new task if everything
+on file is already deeply mapped.
 
 BE AGGRESSIVELY CURIOUS — like a new coworker getting onboarded. Err HARD
 on the side of asking. The goal is to build a complete picture so a future
@@ -484,7 +534,18 @@ Their check-in: "{message.strip()}"
 
 {knowledge_block}
 
+ENTRIES THAT STILL NEED DEPTH (prefer asking about THESE before new topics):
+{incomplete_block}
+
 Already asked about today: {already_str}
+
+Decision flow:
+1. If there's an INCOMPLETE entry above, your question should fill the next
+   missing field for it (steps / frequency / time-per-run / rote-vs-judgment).
+   Anchor to that specific task name.
+2. Otherwise, if the worker just mentioned something new and worth logging
+   (tool/person/job/link/compliance/process), start mapping it.
+3. Otherwise, return null.
 
 Respond as JSON ONLY:
 {{
@@ -995,6 +1056,121 @@ Output ONLY the prompt text — no quotes, no preamble, no JSON.
     except Exception as e:
         log.warning("generate_checkin_prompt failed for %s: %s", first, e)
         return None
+
+
+def rank_automation_candidates(kb_entries: list[dict], scope_label: str = "team") -> str | None:
+    """Take a flat list of Knowledge Base rows (jobs / processes / tools /
+    sheets / people / etc.) and ask Gemini to identify the highest-leverage
+    automation opportunities.
+
+    Returns a markdown/Slack-ready text block ranked top → bottom. None on
+    failure. Scope label is just text like "Hannah" or "the team".
+    """
+    if not config.GOOGLE_API_KEY or not kb_entries:
+        return None
+
+    rows_block = []
+    for k in kb_entries:
+        rows_block.append(
+            f"- worker={k.get('Worker','')} | kind={k.get('Kind','')} | "
+            f"name={k.get('Name','')} | desc={k.get('Description','')[:300]} | "
+            f"steps/notes={k.get('Steps / Notes','')[:300]} | "
+            f"url={k.get('URL','')[:120]} | "
+            f"first_seen={k.get('First Mentioned','')} | "
+            f"refs={k.get('Times Referenced','')}"
+        )
+    rows_text = "\n".join(rows_block[:200])  # cap
+
+    prompt = f"""You're an automation consultant looking at the Knowledge Base
+of a small team's day-to-day work. Identify the 5-8 highest-leverage tasks
+to automate FIRST. Scope: {scope_label}.
+
+Scoring rubric (weigh in this order):
+  1. FREQUENCY × TIME PER RUN — how many person-hours/week does this eat?
+     Daily 30-min task ≫ monthly 2-hour task.
+  2. ROTE-NESS — is the work mostly mechanical (copy data, send templated
+     email, format sheet)? Higher rote = better candidate.
+  3. CLEARLY DEFINED INPUTS/OUTPUTS — can you describe it as "given X,
+     produce Y"? Vague jobs aren't automation candidates yet.
+  4. AVAILABLE INTEGRATIONS — does the tool stack already have APIs /
+     webhooks / scripting? Shopify/Slack/Sheets = easy. Manual UI clicks
+     in random SaaS = harder.
+  5. RISK — automating customer comms or compliance is risky; automating
+     reporting/data-prep is safe.
+
+KNOWLEDGE BASE ENTRIES:
+{rows_text}
+
+For each candidate produce:
+  - "task": short name (the recurring job)
+  - "worker": who does it
+  - "weekly_hours_saved": rough estimate (number)
+  - "automation_idea": 1-sentence concrete proposal (what to build /
+    what tool to use / what to wire together)
+  - "effort": low / med / high (engineering hours to ship)
+  - "blockers": what info is still missing to fully scope this (so Sam
+    can ask the worker the right follow-up)
+
+Sort highest-leverage first. Be honest — if the KB is too thin to
+identify good candidates yet, say so in the "summary" field.
+
+Respond JSON ONLY:
+{{
+  "summary": "1-2 sentence overall read of the team's automation surface",
+  "candidates": [
+    {{
+      "task": "...",
+      "worker": "...",
+      "weekly_hours_saved": 0,
+      "automation_idea": "...",
+      "effort": "low",
+      "blockers": "..."
+    }}
+  ]
+}}
+"""
+    try:
+        data = _gemini_json(prompt, max_tokens=6144)
+    except Exception as e:
+        log.warning("rank_automation_candidates failed: %s", e)
+        return None
+
+    summary = str(data.get("summary", "")).strip()
+    cands = data.get("candidates") or []
+    if not cands and not summary:
+        return None
+
+    lines = [f"*automation candidates — {scope_label}*", ""]
+    if summary:
+        lines.append(f"_{summary}_")
+        lines.append("")
+    for i, c in enumerate(cands, 1):
+        task = str(c.get("task", "")).strip() or "(unnamed task)"
+        worker = str(c.get("worker", "")).strip()
+        hrs = c.get("weekly_hours_saved", 0)
+        idea = str(c.get("automation_idea", "")).strip()
+        effort = str(c.get("effort", "")).strip()
+        blockers = str(c.get("blockers", "")).strip()
+        header = f"*{i}. {task}*"
+        if worker:
+            header += f" · {worker}"
+        if hrs:
+            try:
+                hrs_f = float(hrs)
+                header += f" · ~{hrs_f:.1f}h/wk saved"
+            except (TypeError, ValueError):
+                pass
+        if effort:
+            header += f" · {effort} effort"
+        lines.append(header)
+        if idea:
+            lines.append(f"   :gear: {idea}")
+        if blockers:
+            lines.append(f"   :grey_question: _need to confirm: {blockers}_")
+        lines.append("")
+    if not cands:
+        lines.append("_(no concrete candidates yet — Sam still gathering process detail.)_")
+    return "\n".join(lines)
 
 
 def classify_admin_intent(message: str, worker_names: list[str]) -> dict | None:
