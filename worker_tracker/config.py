@@ -142,8 +142,8 @@ LIBRARY_HEADER = [
 # cadence (every 90/120/180 min per worker) instead of interrupting them at
 # random times. Daily cap is a safety upper bound; cooldown is a softer guard
 # so two rapid replies in the same check-in window don't both trigger asks.
-MAX_FOLLOWUPS_PER_DAY = int(os.environ.get("MAX_FOLLOWUPS_PER_DAY", "5"))
-FOLLOWUP_COOLDOWN_MINUTES = int(os.environ.get("FOLLOWUP_COOLDOWN_MINUTES", "60"))
+MAX_FOLLOWUPS_PER_DAY = int(os.environ.get("MAX_FOLLOWUPS_PER_DAY", "12"))
+FOLLOWUP_COOLDOWN_MINUTES = int(os.environ.get("FOLLOWUP_COOLDOWN_MINUTES", "15"))
 
 WEEKLY_SYNTHESIS_DOW = int(os.environ.get("WEEKLY_SYNTHESIS_DOW", "6"))  # 0=Mon, 6=Sun
 WEEKLY_SYNTHESIS_TIME = os.environ.get("WEEKLY_SYNTHESIS_TIME", "21:00")

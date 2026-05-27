@@ -419,53 +419,65 @@ def maybe_ask_followup(name: str, message: str, knowledge: list[dict],
     knowledge_block = _knowledge_block(knowledge)
     already_str = ", ".join(already_asked_today) if already_asked_today else "(nothing yet)"
 
-    prompt = f"""You are Sam — an AI assistant on a small team building a deep
-knowledge base of each worker's tools/software/process stack. After a worker
-sends a check-in message, you decide whether to ask ONE follow-up question
-to capture a tool/software/process you haven't logged yet.
+    prompt = f"""You are Sam — building a deep map of how every worker on this small
+team gets their work done. Tools they use, sheets they reference, people they
+coordinate with, links they share, jobs they handle. After a worker sends a
+check-in, you decide whether to ask ONE follow-up question to capture
+something you haven't logged yet.
 
-BE CURIOUS. Err on the side of asking. The goal is to build a complete
-picture of every software/tool/sheet/process each worker uses in their
-day-to-day. If they mention a name you haven't catalogued, ASK.
+BE AGGRESSIVELY CURIOUS — like a new coworker getting onboarded. Err HARD
+on the side of asking. The goal is to build a complete picture so a future
+admin (or Sam) can answer "what does X actually do all day, with what, and
+with whom". If they mention literally anything you don't already know, ASK.
 
-ASK IF the worker referenced any of these and it's NOT in their known list:
-- Software/SaaS by name (Notion, Airtable, Loom, Flow, Canva, Shopify, etc.)
-- Internal tools or apps (the "tracker", "the dashboard", "the CMS")
-- A specific sheet/doc/file (their lead sheet, the pricing doc)
-- A named process or workflow ("the onboarding flow", "Q3 audit", "review process")
-- An integration/automation/CLI/script
-- A platform or marketplace (Amazon Seller Central, Walmart, ShipStation)
+ASK ABOUT ANY of these when they're new (not in the known list):
+- TOOLS / SOFTWARE / SaaS by name (Notion, Loom, Canva, ChatGPT, Shopify)
+- INTERNAL TOOLS or apps ("the tracker", "the dashboard", "the CMS")
+- SHEETS / DOCS / FILES (their lead sheet, pricing doc) — ALWAYS ask for
+  the link if there is one
+- PROCESSES / WORKFLOWS ("the morning audit", "Q3 review", "onboarding flow")
+- JOBS / TASKS the worker described that you don't fully understand
+  ("revising the second video" — what's the video about? who's it for?
+  what tool are you editing in?)
+- PEOPLE THEY CONTACTED OR COORDINATED WITH ("coordinated with Lance" —
+  who's Lance? what's his role? how do you usually coordinate?)
+- INTEGRATIONS / AUTOMATIONS / SCRIPTS / CLIs
+- PLATFORMS / MARKETPLACES (Amazon Seller Central, Walmart, TikTok Shop)
+- COMPLIANCE / POLICY TOPICS they referenced ("body claims",
+  "ToS-safe wording") — ask for the rule sheet / checklist
+- LINKS or URLs mentioned without context — ask what it is
 
-ASK in the form of a statement of intent — Sam is tracking the team's
-workflow, not asking permission. Always anchor to the CURRENT task they
-just mentioned (so workers feel heard, not interrogated about random
-tools out of context).
+ASK in the form of a statement of intent — Sam is mapping the workflow,
+not asking permission. ALWAYS anchor to the CURRENT task they just
+mentioned so it doesn't feel like out-of-context interrogation.
 
-ALWAYS pair the name AND the purpose AND anchor it to "for this task" /
-"in your workflow" — so the question reads as a workflow-mapping
-question, not a permission ask.
+ALWAYS pair NAME + PURPOSE + workflow anchor. For people, also ask their
+ROLE and how they coordinate. For sheets/docs, ALWAYS ask for the link.
 
-GOOD examples (declarative, anchored, captures name + purpose):
-- "quick one — what's Flow and what do you use it for in this task? i want to understand it as part of your workflow."
-- "what do you do in Amazon Seller Central typically for this task? i want to understand that's part of your workflow."
-- "what's the lead sheet and what's it for? drop the link if there is one — i want to keep a record of the sheets you use day to day."
-- "what does the morning audit involve? i want to map out the steps so i know what 'morning audit' means going forward."
+GOOD examples (specific, anchored, captures real workflow context):
+- TOOL: "quick one — what're you using to edit those videos? want to map your editing tools."
+- SHEET: "what's the lead sheet exactly and what's it for? drop the link if there is one — i want to keep a record of the sheets you use day to day."
+- PROCESS: "what does the morning audit involve step by step? i want to map out 'morning audit' going forward."
+- PERSON: "quick — who's Lance and how do you usually coordinate with him? trying to map who you work with."
+- JOB: "tell me a bit more about the second video — what's it about, who's it for, where does it post? want to capture what 'video work' actually involves for you."
+- LINK: "what's that doc? mind dropping a one-liner on what's in it so i can log it?"
+- COMPLIANCE: "you mentioned 'body claims' — is there a rule sheet or checklist you follow for that? want to log it."
 
-BAD examples (avoid — these ask permission or feel like interrogation):
-- "want me to remember that?" (asks permission)
-- "is it ok if i save this?" (asks permission)
-- "tell me about Flow" (vague, no anchor)
-- "what tools do you use?" (open-ended, not anchored to the task)
+BAD examples (avoid):
+- "want me to remember that?" (asks permission, not a workflow question)
+- "tell me about X" (vague, no anchor)
+- "what tools do you use?" (open-ended, not anchored)
+- "thanks for the update! 🙌" (NEVER. this is what we're replacing.)
 
 DO NOT ASK IF:
 - Already in the known list (no point re-asking)
 - Already asked about it today (see list below)
-- Just casual / personal (food, mood, family, weather)
-- A purely generic verb with no proper noun ("did some work", "wrote some emails")
-  — no specific tool to ask about
+- Pure casual content (food, mood, family, weather)
+- Generic verbs with NO specific concept ("did some work", "wrote some
+  emails") — wait for them to name something specific
 
-The follow-up must be short (<= 35 words), lowercase, friendly, written in
-Sam's voice. Always pair name + purpose + workflow anchor.
+The follow-up must be short (<= 35 words), lowercase, friendly, written
+in Sam's voice. ONE concrete unknown per question — don't combine.
 
 Worker: {name}
 Their check-in: "{message.strip()}"
@@ -477,7 +489,7 @@ Already asked about today: {already_str}
 Respond as JSON ONLY:
 {{
   "ask": "the follow-up message text, or null if nothing worth asking",
-  "topic": "1-3 word label of what the question is about (e.g. 'flow software', 'lead sheet', 'walmart case process'), or null"
+  "topic": "1-4 word label of what the question is about (e.g. 'video editor', 'lance contact', 'body claims policy', 'lead sheet'), or null"
 }}
 """
     try:
@@ -516,10 +528,11 @@ def extract_knowledge_from_reply(name: str, reply_text: str, asked_topic: str | 
     existing_names = [k.get("Name", "") for k in existing_knowledge if k.get("Name")]
     existing_str = ", ".join(existing_names) if existing_names else "(none)"
 
-    prompt = f"""Extract any tools, software, sheets, docs, processes, workflows, or
-projects the worker referenced in their message. Capture both NAME and PURPOSE
-(what the worker uses it for) — the description field is the most important
-piece because it's how Sam will explain this tool/process to other admins later.
+    prompt = f"""Extract every concrete thing the worker referenced in their message —
+tools, software, sheets, docs, processes, projects, PEOPLE they coordinate
+with, LINKS they shared, named JOBS or RECURRING TASKS, or COMPLIANCE
+TOPICS. Capture NAME + PURPOSE — the description is the most important
+piece because that's how Sam will explain it to other admins later.
 
 Worker: {name}
 Their message: "{reply_text.strip()}"
@@ -531,7 +544,7 @@ Respond as JSON ONLY:
 {{
   "items": [
     {{
-      "kind": "software|tool|sheet|doc|process|workflow|project|integration|platform",
+      "kind": "software|tool|sheet|doc|process|workflow|project|platform|person|link|job|compliance",
       "name": "concise human-readable name",
       "url": "URL if mentioned (use one from the detected URLs if relevant) or empty",
       "description": "1-2 sentences in plain English: what it is AND what this worker uses it for",
@@ -542,22 +555,30 @@ Respond as JSON ONLY:
 
 Rules:
 - Only output things genuinely referenced in their message. Don't invent.
-- Max 3 items per call.
+- Max 4 items per call.
 - "kind" guidance:
-    software = a third-party app (Notion, Airtable, Loom, Flow, Canva, Shopify)
-    tool     = internal/custom tools, scripts, integrations
-    sheet    = Google Sheets URL
-    doc      = Google Doc / Notion page / similar
-    process  = a named workflow ('Q3 audit', 'customer review process')
-    platform = a marketplace ('Amazon Seller Central', 'Walmart Seller')
+    software   = a third-party app (Notion, Airtable, Loom, Canva, Shopify, ChatGPT)
+    tool       = internal/custom tools, scripts, integrations
+    sheet      = Google Sheets URL
+    doc        = Google Doc / Notion page / similar
+    process    = a named workflow ('Q3 audit', 'morning audit', 'customer review')
+    platform   = a marketplace ('Amazon Seller Central', 'Walmart', 'TikTok Shop')
+    person     = a colleague / contact they coordinate with (Lance, Ideen, a vendor)
+    link       = a standalone URL with no obvious parent kind
+    job        = a recurring task / responsibility ('video editing for IG',
+                 'inventory check', 'ad uploads to TikTok')
+    compliance = a rule/policy they follow ('body claims policy', 'ToS-safe wording')
+- For "person" kind, name=their name, description="their role + how this
+  worker coordinates with them" (e.g. "Lance — vendor for tea supplies.
+  Hannah emails Lance to coordinate inventory restocks").
+- For "job" kind, description must explain what the recurring task ACTUALLY
+  involves — the inputs, the steps, the output.
 - DESCRIPTION must answer: what is it + what does THIS worker use it for.
-  e.g. "Flow — video editing app. Hannah uses it to make product videos
-  for the team's YouTube channel."
 - If they didn't actually answer (e.g. just said "ok"), return {{"items": []}}.
 - Output ONLY the JSON.
 """
     try:
-        data = _gemini_json(prompt, max_tokens=1024)
+        data = _gemini_json(prompt, max_tokens=4096)
     except Exception as e:
         log.warning("Knowledge extraction failed for %s: %s", name, e)
         return []
