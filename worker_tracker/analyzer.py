@@ -616,6 +616,9 @@ Respond as JSON ONLY:
 
 Rules:
 - Only output things genuinely referenced in their message. Don't invent.
+- NEVER include "Sam" (that's you, the bot) as a person. Workers DM you;
+  you're not a person they coordinate with. Same for any reference to
+  yourself.
 - Max 4 items per call.
 - "kind" guidance:
     software   = a third-party app (Notion, Airtable, Loom, Canva, Shopify, ChatGPT)
@@ -648,14 +651,22 @@ Rules:
     if not isinstance(items, list):
         return []
     cleaned = []
-    for it in items[:3]:
+    # Filter: never log the bot itself as a "person" — workers DM Sam, they
+    # don't coordinate with Sam as a colleague.
+    BOT_SELF_NAMES = {"sam", "sam (bot)", "sam app", "the bot", "you",
+                       "the assistant", "ai"}
+    for it in items[:4]:
         if not isinstance(it, dict):
             continue
         name_val = str(it.get("name", "")).strip()
         if not name_val:
             continue
+        kind_val = str(it.get("kind", "tool")).strip().lower()
+        # Drop bot-self false positives
+        if kind_val == "person" and name_val.lower() in BOT_SELF_NAMES:
+            continue
         cleaned.append({
-            "Kind": str(it.get("kind", "tool")).strip().lower(),
+            "Kind": kind_val,
             "Name": name_val,
             "URL": str(it.get("url", "")).strip(),
             "Description": str(it.get("description", "")).strip(),

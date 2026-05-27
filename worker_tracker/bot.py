@@ -1591,19 +1591,22 @@ def _reset_followups_if_new_day(user_id: str, local_date: str) -> None:
 def _handle_knowledge_and_followup(user_id: str, worker: dict, text: str,
                                    today: str, client,
                                    ask_new_followups: bool = True) -> None:
-    """Two-step:
+    """Three-step:
     1) If we asked a follow-up earlier and they're now replying, extract any
        tools/sheets/processes from the reply and save to the Knowledge tab.
-       (Always runs — if Sam asked, Sam saves the answer.)
-    2) If `ask_new_followups` is True, maybe ask a NEW follow-up about
+    2) SPONTANEOUS extract — if the worker shares a URL or substantive
+       knowledge content WITHOUT being asked (like Ger dropping a Sheets
+       link + 'this is for tracking our social media accounts'), grab it
+       anyway. Workers handing over context is the same gold whether
+       prompted or not.
+    3) If `ask_new_followups` is True, maybe ask a NEW follow-up about
        something the worker mentioned. Gated by daily cap + cooldown.
-       (Caller passes False when the worker isn't replying to Sam's
-       periodic check-in prompt — keeps Sam's curiosity on cadence.)
     """
     _reset_followups_if_new_day(user_id, today)
     existing = sheets.list_worker_knowledge(user_id)
 
     pending = PENDING_FOLLOWUP.pop(user_id, None)
+    captured_via_pending = False
     if pending:
         items = analyzer.extract_knowledge_from_reply(
             name=worker["name"],
@@ -1619,8 +1622,56 @@ def _handle_knowledge_and_followup(user_id: str, worker: dict, text: str,
             _dm(client, user_id,
                 f"saved 🙌 (logged {len(items)} new {'item' if len(items)==1 else 'items'} to your tools list — thanks)",
                 event_type="sam_knowledge_saved")
-            # Refresh existing so we don't double-ask about something we just learned
             existing = sheets.list_worker_knowledge(user_id)
+            captured_via_pending = True
+
+    # ── SPONTANEOUS capture ──
+    # If the worker shared content that looks knowledge-worthy WITHOUT us
+    # asking (URL present, or a substantive description of a tool/process/
+    # person), run the extractor anyway. Workers like Ger sometimes just
+    # drop a link and describe it without waiting for a prompt — that's
+    # gold and we should grab it.
+    if not captured_via_pending:
+        # Cheap pre-filter so we only spend a Gemini call on plausibly-rich
+        # messages: must contain either a URL OR be substantive (>=40 chars
+        # AND not match a simple workflow signal like break/eod).
+        from .analyzer import URL_RE
+        has_url = bool(URL_RE.search(text or ""))
+        is_substantive = len((text or "").strip()) >= 40
+        is_workflow_signal = (
+            is_break_start(text) or is_break_end(text) or is_eod(text)
+            or is_hours_query(text) or is_discrepancy(text)
+        )
+        if (has_url or is_substantive) and not is_workflow_signal:
+            try:
+                items = analyzer.extract_knowledge_from_reply(
+                    name=worker["name"],
+                    reply_text=text,
+                    asked_topic=None,  # unprompted
+                    existing_knowledge=existing,
+                )
+            except Exception:
+                log.exception("Spontaneous knowledge extract failed for %s", worker["name"])
+                items = []
+            if items:
+                for it in items:
+                    it["Worker"] = worker["name"]
+                    it["Slack User ID"] = user_id
+                    sheets.upsert_knowledge(it)
+                # Compose a nicer ack that names what we logged, so the worker
+                # sees Sam actually heard them.
+                names = ", ".join(
+                    f"{(it.get('Name') or '').strip()[:40]}" for it in items if it.get("Name")
+                )
+                if names:
+                    _dm(client, user_id,
+                        f"got it — logged {names} 🙌 (in your tools/processes notes)",
+                        event_type="sam_knowledge_saved_spontaneous")
+                else:
+                    _dm(client, user_id,
+                        f"got it — logged {len(items)} item(s) 🙌",
+                        event_type="sam_knowledge_saved_spontaneous")
+                existing = sheets.list_worker_knowledge(user_id)
 
     if not ask_new_followups:
         return
