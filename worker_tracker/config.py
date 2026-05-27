@@ -316,6 +316,34 @@ ADMIN_RELAY_PATTERNS = (
 
 # Admins can ask "what is X doing" / "where's X" / "status of X" / etc.
 # The (.+?) captures the worker name (can be partial: "Hannah" matches "Hannah May Bagares").
+ADMIN_TEAM_STATUS_PATTERNS = (
+    # Collective check-ins: "did everyone log in", "who clocked in", "is anyone working"
+    r"\bdid\s+(?:everyone|everybody|anyone|anybody|the team|all of them|the workers?)\s+"
+    r"(?:clock in|log on|log in|sign in|start|EOD|finish|wrap|come on|come online)\b",
+    r"\b(?:is|are)\s+(?:everyone|everybody|anyone|anybody|the team|all of them|the workers?)\s+"
+    r"(?:working|online|on|here|around|up|in|logged in|clocked in)\b",
+    r"\bwho(?:'?s| is| has)?\s+"
+    r"(?:working|online|here|around|up|in|logged in|clocked in|on the clock|on break|missing|done|out|finished|EOD'?d?)\b",
+    r"\bwho(?:'?s| is)?\s+(?:not\s+)?(?:in|logged in|clocked in|working|here|up|on|online)\s+(?:today|yet)?\b",
+    r"\bwho\s+(?:hasn'?t|has\s+not|hadn'?t|had\s+not)\s+(?:logged in|clocked in|started|signed in|shown up|come on|come in)\b",
+    r"\b(?:team|everyone'?s|everybody'?s)\s+status\b",
+    r"\bstatus\s+(?:of\s+)?(?:the\s+)?(?:team|everyone|everybody)\b",
+    r"\bhow(?:'?s| is| are)\s+(?:everyone|everybody|the team|the workers?)\s+(?:doing|going|today)?\b",
+    r"\b(?:everyone|everybody|the team|the workers?)\s+(?:doing|working|online|logged in|clocked in)\b",
+)
+
+
+# Words/phrases that should NEVER be treated as a worker name. When the
+# per-worker status regex captures one of these as the worker, route the
+# query to the team-wide handler instead of telling the admin "don't know
+# anyone named 'everyone' on the roster".
+TEAM_WIDE_PRONOUNS = frozenset({
+    "everyone", "everybody", "anyone", "anybody", "the team", "team",
+    "all", "all of them", "all of us", "the workers", "workers",
+    "the squad", "squad", "the crew", "crew", "everyone's", "everybodys",
+})
+
+
 ADMIN_DIGEST_NOW_PATTERNS = (
     # "send the EOD digest" / "EOD report now" / "give me today's digest" / "run digest"
     r"\b(?:send|run|trigger|give me|gimme)\s+(?:the\s+|today'?s\s+)?(?:eod|EOD|daily)\s+(?:report|digest|summary)\b",

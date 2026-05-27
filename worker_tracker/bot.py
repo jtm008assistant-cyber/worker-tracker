@@ -40,6 +40,7 @@ _admin_drive_audit_re = re.compile("|".join(config.ADMIN_DRIVE_AUDIT_PATTERNS), 
 _admin_forward_re = re.compile("|".join(config.ADMIN_FORWARD_PATTERNS), re.IGNORECASE | re.DOTALL)
 _admin_relay_re = re.compile("|".join(config.ADMIN_RELAY_PATTERNS), re.IGNORECASE)
 _admin_digest_now_re = re.compile("|".join(config.ADMIN_DIGEST_NOW_PATTERNS), re.IGNORECASE)
+_admin_team_status_re = re.compile("|".join(config.ADMIN_TEAM_STATUS_PATTERNS), re.IGNORECASE)
 
 scheduler = BackgroundScheduler()
 _app = None  # set in main()
@@ -219,6 +220,68 @@ def _worker_today_snapshot(worker: dict) -> dict:
         "hours_so_far_today": hours_so_far,
         "today_checkins": today_checkins,
     }
+
+
+def _format_team_status() -> str:
+    """One-shot team-wide status snapshot. Answers 'did everyone log in?',
+    'who's working?', 'team status', 'is anyone on break?', etc.
+
+    Compact per-worker line: emoji + name + state + hours + login. Sorted so
+    actively-working workers appear first, then on-break, then logged-off,
+    then never-clocked-in. Owners are excluded (they aren't tracked workers).
+    """
+    workers = [w for w in WORKERS.values() if w["user_id"] not in config.OWNER_SLACK_IDS]
+    if not workers:
+        return "no workers on the roster yet."
+
+    from datetime import datetime as _dt
+    now_mgr = _dt.now(ZoneInfo(config.MANAGER_TZ)).strftime("%H:%M %Z")
+    today_str = _dt.now(ZoneInfo(config.MANAGER_TZ)).date().isoformat()
+
+    rows: list[tuple[int, str]] = []  # (sort_rank, line)
+    for w in workers:
+        try:
+            snap = _worker_today_snapshot(w)
+        except Exception:
+            log.exception("team status snapshot failed for %s", w["name"])
+            rows.append((9, f"❓ *{w['name']}* — couldn't pull data"))
+            continue
+
+        state = snap["state"]
+        first = w["name"].split()[0] if w["name"] else w["name"]
+        h = snap["hours_so_far_today"]
+        try:
+            tz = ZoneInfo(w["tz"])
+        except Exception:
+            tz = ZoneInfo("UTC")
+        login_str = snap["login_ts"].astimezone(tz).strftime("%H:%M") if snap["login_ts"] else "—"
+
+        if state == "working":
+            last = ""
+            if snap.get("last_checkin_ts") and snap.get("last_checkin_msg"):
+                mins = int((datetime.now(timezone.utc) - snap["last_checkin_ts"]).total_seconds() / 60)
+                last = f" · last ping {mins}m ago"
+            rows.append((0, f"🟢 *{first}* — working · {h:.2f}h · clocked in {login_str}{last}"))
+        elif state == "on_break":
+            bmin = 0
+            if snap.get("break_start_ts"):
+                bmin = int((datetime.now(timezone.utc) - snap["break_start_ts"]).total_seconds() / 60)
+            rows.append((1, f"🟡 *{first}* — on break ({bmin}m) · {h:.2f}h so far · clocked in {login_str}"))
+        elif state == "logged_off":
+            eod_str = ""
+            if snap.get("eod_ts"):
+                eod_str = snap["eod_ts"].astimezone(tz).strftime("%H:%M")
+            rows.append((2, f"⚫ *{first}* — logged off · {h:.2f}h · {login_str}→{eod_str}"))
+        else:  # not_started
+            rows.append((3, f"⚪ *{first}* — hasn't clocked in today"))
+
+    rows.sort(key=lambda r: r[0])
+    body = "\n".join(line for _, line in rows)
+    return (
+        f"*team status — {today_str}* (as of {now_mgr})\n\n"
+        f"{body}\n\n"
+        f"_ask 'what did <name> do today' for a per-worker recap with their check-in trail._"
+    )
 
 
 def _format_worker_status(worker: dict, include_today_recap: bool = True) -> str:
@@ -544,6 +607,20 @@ def handle_message(event, client) -> None:
                 pass
         return
 
+    # Team-wide status: "did everyone log in", "who's working", "team status",
+    # "is anyone on break". Checked BEFORE per-worker so "everyone" / "the team"
+    # don't get mis-parsed as a worker name (the bug Jan flagged at 8:48 PM).
+    if is_admin and _admin_team_status_re.search(text):
+        try:
+            client.chat_postMessage(channel=user_id, text=_format_team_status())
+        except sheets.RateLimited:
+            client.chat_postMessage(channel=user_id,
+                text="give me a sec — Google's rate-limiting me. try again in ~30s 🙏")
+        except Exception as e:
+            log.exception("team status failed")
+            client.chat_postMessage(channel=user_id, text=f"hit an error building team status: {e}")
+        return
+
     if is_admin:
         # "what is X doing" / "status of X" / etc.
         m = _admin_status_re.search(text)
@@ -570,6 +647,16 @@ def handle_message(event, client) -> None:
                 if stripped == query:
                     break
                 query = stripped
+            # Guard: if the captured name is a team-wide pronoun ("everyone",
+            # "the team", "anyone", "all", etc.), route to the team handler
+            # instead of saying "don't know anyone named 'everyone'".
+            if query.lower().strip() in config.TEAM_WIDE_PRONOUNS:
+                try:
+                    client.chat_postMessage(channel=user_id, text=_format_team_status())
+                except Exception as e:
+                    log.exception("team status fallback failed")
+                    client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+                return
             matches = _find_worker_by_name(query)
             if not matches:
                 client.chat_postMessage(channel=user_id, text=f"don't know anyone named '{query}' on the roster — try just their first name?")
