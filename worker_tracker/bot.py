@@ -125,13 +125,27 @@ def _format_hours_summary(worker: dict) -> str:
 
 
 def _find_worker_by_name(query: str) -> list[dict]:
-    """Fuzzy match a name query against the roster. Tries (1) full name exact,
-    (2) first-name exact, (3) nickname exact, (4) substring. Returns list of
-    matching worker dicts."""
+    """Fuzzy match a name query against the roster.
+
+    Match tiers (most strict → most lenient):
+      1) Exact full-name match
+      2) First-name exact match
+      3) Nickname exact match (from Roster Nicknames col)
+      4) Substring of any name part (handles "ger" → "Gerrielyn")
+      5) Levenshtein-style fuzzy match via difflib (handles typos like
+         "jonyn" → "Jonny", "hanna" → "Hannah", "rey lui" → "Rey Louie").
+         Threshold 0.75 ratio = catches 1-2 char typos in short names
+         without false-positiving onto unrelated workers.
+
+    Returns list of matching worker dicts (usually 1, sometimes 0 or 2+).
+    """
+    import difflib
+
     q = query.strip().lower()
     if not q:
         return []
     workers = list(WORKERS.values())
+
     # 1) exact full-name match
     exact = [w for w in workers if w["name"].lower() == q]
     if exact:
@@ -144,9 +158,30 @@ def _find_worker_by_name(query: str) -> list[dict]:
     nick_match = [w for w in workers if q in (w.get("nicknames") or [])]
     if nick_match:
         return nick_match
-    # 4) substring anywhere in full name
-    substr = [w for w in workers if q in w["name"].lower()]
-    return substr
+    # 4) substring of full name or first name
+    substr = [w for w in workers if q in w["name"].lower() or q in w["name"].split()[0].lower()]
+    if substr:
+        return substr
+
+    # 5) Fuzzy match using difflib — covers typos. Compare against full name,
+    # first name, and every nickname. Use the highest ratio per worker, then
+    # filter to 0.75+ and return the best (or tied best) match(es).
+    scored: list[tuple[float, dict]] = []
+    for w in workers:
+        candidates = [w["name"].lower(), w["name"].split()[0].lower()]
+        candidates.extend(w.get("nicknames") or [])
+        best = max(
+            (difflib.SequenceMatcher(None, q, c).ratio() for c in candidates),
+            default=0.0,
+        )
+        scored.append((best, w))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    top = scored[0][0] if scored else 0.0
+    if top < 0.75:
+        return []
+    # Return everyone tied with the top (within 0.05) so genuinely-ambiguous
+    # queries still surface multiple matches to the admin.
+    return [w for s, w in scored if s >= top - 0.05]
 
 
 def _worker_today_snapshot(worker: dict) -> dict:
@@ -1001,6 +1036,59 @@ def handle_message(event, client) -> None:
             "noted — flagging this for the manager. drop more detail if you need it sooner.",
             event_type="sam_help_ack")
     else:
+        # ── Typo-tolerant admin intent fallback ──
+        # All the admin regex patterns missed. Before we fall through to a
+        # general conversational reply, ask Gemini Flash whether this looks
+        # like a status / team / digest query with a typo we didn't catch.
+        # Catches "watt did hanna do" / "is jonyn worken" / "wuts the team
+        # doin" — anything regex was too rigid for.
+        if is_admin:
+            try:
+                worker_names = [w["name"].split()[0] for w in WORKERS.values()
+                                if w["user_id"] not in config.OWNER_SLACK_IDS]
+                intent = analyzer.classify_admin_intent(text, worker_names)
+            except Exception:
+                log.exception("classify_admin_intent crashed")
+                intent = None
+            if intent and intent.get("confidence") in ("high", "medium"):
+                kind = intent.get("intent")
+                if kind == "team_status":
+                    try:
+                        client.chat_postMessage(channel=user_id, text=_format_team_status())
+                    except Exception as e:
+                        log.exception("team status (via intent fallback) failed")
+                        client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+                    return
+                if kind == "digest_now":
+                    try:
+                        client.chat_postMessage(channel=user_id, text="on it — building today's EOD digest now… 📊")
+                        from . import report as _report
+                        result = _report.send_daily_digest()
+                        status = "✓" if result["slack"] else "✗"
+                        client.chat_postMessage(channel=user_id,
+                            text=f"{status} digest sent · {result['workers']} workers")
+                    except Exception as e:
+                        log.exception("digest (via intent fallback) failed")
+                        client.chat_postMessage(channel=user_id, text=f"digest blew up: {e}")
+                    return
+                if kind == "worker_status" and intent.get("worker"):
+                    matches = _find_worker_by_name(intent["worker"])
+                    if matches and len(matches) == 1:
+                        target = matches[0]
+                        if is_manager and not is_owner and target["user_id"] in config.OWNER_SLACK_IDS:
+                            client.chat_postMessage(channel=user_id,
+                                text=f"sorry, can't share that with you 🙅 status on {target['name'].split()[0]} is owner-level only.")
+                            return
+                        try:
+                            snapshot = _format_worker_status(target)
+                            client.chat_postMessage(channel=user_id, text=snapshot)
+                        except Exception as e:
+                            log.exception("worker status (via intent fallback) failed")
+                            client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+                        return
+                    # If multiple or none, fall through to conversational —
+                    # Sam can ask "which one?" naturally.
+
         # Everyone gets a real conversational reply for messages that didn't match a
         # specific command. If they were responding to Sam's periodic check-in
         # prompt, ALWAYS acknowledge — even a simple 'thanks for the update' so

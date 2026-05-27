@@ -971,6 +971,71 @@ Output ONLY the prompt text — no quotes, no preamble, no JSON.
         return None
 
 
+def classify_admin_intent(message: str, worker_names: list[str]) -> dict | None:
+    """Fuzzy intent classifier for admin messages that didn't match any regex.
+    Returns one of:
+      {"intent": "worker_status", "worker": "Hannah", "confidence": "high"|"medium"|"low"}
+      {"intent": "team_status", "confidence": "..."}
+      {"intent": "digest_now", "confidence": "..."}
+      {"intent": "other"}
+    or None on failure.
+
+    The point: regex patterns are brittle to typos ("watt did hannah do",
+    "is jonny worken", "wuts hannah doing"). Flash is smart enough to
+    understand these — we just need to ask it. This is the LAST stop before
+    falling through to general conversational reply, so we use cheap
+    short-prompt Gemini calls (~1s).
+    """
+    if not config.GOOGLE_API_KEY or not message.strip():
+        return None
+    names_block = ", ".join(worker_names) if worker_names else "(none)"
+    prompt = f"""Classify this admin message. The admin uses Sam, a worker
+tracking bot, and might be asking about a specific worker, the whole team, or
+asking Sam to do something else. Worker names on the roster: {names_block}
+
+ADMIN MESSAGE: "{message.strip()}"
+
+Decide ONE of:
+- "worker_status": admin is asking about ONE specific worker's status, hours,
+  current activity, or what they did today. Even if the name is misspelled
+  ("jonyn", "hanna", "rey lui"), match to the closest roster name.
+- "team_status": admin is asking about EVERYONE / the whole team / who's
+  working / who hasn't logged in.
+- "digest_now": admin wants the EOD digest sent now ("send digest", "EOD
+  report").
+- "other": anything else (casual chat, command not handled by the above).
+
+START YOUR RESPONSE WITH the open-brace character. No preamble like "Here
+is the JSON" or "Sure, I'll classify". Output JSON ONLY:
+{{
+  "intent": "worker_status" | "team_status" | "digest_now" | "other",
+  "worker": "<exact roster name if worker_status, else null>",
+  "confidence": "high" | "medium" | "low"
+}}
+
+Be CONSERVATIVE: if you're not sure, return "other". If the message is just
+"hey" or "how's it going" — return "other" (it's just chat, not a query).
+"""
+    try:
+        # Bumped 256 → 512. With 256 Gemini was emitting prose preamble
+        # ("Here is the JSON requested:") and running out of tokens BEFORE
+        # the actual JSON. 512 ensures any preamble + the 60-char JSON fits.
+        data = _gemini_json(prompt, max_tokens=512)
+    except Exception as e:
+        log.warning("classify_admin_intent failed: %s", e)
+        return None
+    intent = str(data.get("intent", "")).strip().lower()
+    if intent not in ("worker_status", "team_status", "digest_now", "other"):
+        return None
+    worker = data.get("worker")
+    if worker and not isinstance(worker, str):
+        worker = None
+    confidence = str(data.get("confidence", "low")).strip().lower()
+    if confidence not in ("high", "medium", "low"):
+        confidence = "low"
+    return {"intent": intent, "worker": worker, "confidence": confidence}
+
+
 def conversational_reply(message: str, speaker_name: str, is_owner: bool,
                           is_manager: bool, is_worker: bool = False,
                           recent_context: str = "",
