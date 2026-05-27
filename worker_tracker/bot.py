@@ -45,6 +45,13 @@ _task_list_worker_re = re.compile("|".join(config.TASK_LIST_WORKER_PATTERNS), re
 _task_list_admin_re = re.compile("|".join(config.TASK_LIST_ADMIN_PATTERNS), re.IGNORECASE)
 _automation_review_re = re.compile("|".join(config.AUTOMATION_REVIEW_PATTERNS), re.IGNORECASE)
 _admin_learned_re = re.compile("|".join(config.ADMIN_LEARNED_PATTERNS), re.IGNORECASE)
+_worker_self_history_re = re.compile("|".join(config.WORKER_SELF_HISTORY_PATTERNS), re.IGNORECASE)
+_worker_knowledge_query_re = re.compile("|".join(config.WORKER_KNOWLEDGE_QUERY_PATTERNS), re.IGNORECASE)
+_worker_share_process_re = re.compile("|".join(config.WORKER_SHARE_PROCESS_PATTERNS), re.IGNORECASE)
+# When True for a worker, the next message they send is treated as the
+# content of a "share a process" capture. Force-extracted to KB regardless
+# of length, ack'd with what was logged.
+PENDING_SHARE_CAPTURE: dict[str, datetime] = {}
 
 scheduler = BackgroundScheduler()
 _app = None  # set in main()
@@ -291,6 +298,128 @@ def _worker_today_snapshot(worker: dict) -> dict:
         "hours_so_far_today": hours_so_far,
         "today_checkins": today_checkins,
     }
+
+
+def _format_self_history(worker: dict, days_back: int = 0) -> str:
+    """Return a worker's own activity trail. days_back=0 = today, 1 = yesterday."""
+    from datetime import datetime as _dt, timedelta as _td
+    first = worker["name"].split()[0] if worker["name"] else "you"
+    try:
+        tz = ZoneInfo(worker["tz"])
+    except Exception:
+        tz = ZoneInfo("UTC")
+    target_date = (_dt.now(tz).date() - _td(days=days_back)).isoformat()
+    when_label = "today" if days_back == 0 else ("yesterday" if days_back == 1 else target_date)
+
+    try:
+        events = [
+            r for r in sheets.activity_rows(target_date)
+            if r.get("Slack User ID") == worker["user_id"]
+            and r.get("Type") in ("login", "checkin", "help_request",
+                                    "break_start", "break_end", "eod")
+        ]
+    except Exception:
+        log.exception("self-history fetch failed for %s", worker["name"])
+        events = []
+    events.sort(key=lambda r: r.get("Timestamp UTC", ""))
+
+    if not events:
+        return f"hey {first} — no activity logged {when_label} ({target_date}). either you weren't on or messages didn't make it through."
+
+    lines = [f"here's your trail from {when_label}, {first}:"]
+    for r in events:
+        t = r.get("Type", "")
+        msg = (r.get("Message") or "").strip()
+        local_t = (r.get("Local Time") or "")[:5]
+        if t == "login":
+            lines.append(f"  • {local_t} — clocked in")
+        elif t == "eod":
+            note = ""
+            if "auto-EOD" in msg or "auto-closed" in msg:
+                note = " _(auto-closed)_"
+            lines.append(f"  • {local_t} — EOD{note}")
+        elif t == "break_start":
+            lines.append(f"  • {local_t} — break started")
+        elif t == "break_end":
+            lines.append(f"  • {local_t} — back from break")
+        elif t == "help_request" and msg:
+            lines.append(f"  • {local_t} — 🆘 {msg[:160]}")
+        elif t == "checkin" and msg:
+            lines.append(f"  • {local_t} — \"{msg[:160]}\"")
+
+    # Add hours summary if it's today
+    if days_back == 0:
+        try:
+            snap = _worker_today_snapshot(worker)
+            h = snap.get("hours_so_far_today", 0)
+            if h:
+                lines.append("")
+                lines.append(f"_{h:.2f}h on the clock so far today_")
+        except Exception:
+            pass
+
+    lines.append("")
+    lines.append("_if anything's missing or wrong, message me with the correction._")
+    return "\n".join(lines)
+
+
+def _format_worker_knowledge(worker: dict) -> str:
+    """Return what Sam has logged about this worker's tools / processes /
+    people / sheets / etc."""
+    first = worker["name"].split()[0] if worker["name"] else "you"
+    try:
+        kb = sheets.list_worker_knowledge(worker["user_id"])
+    except Exception:
+        log.exception("kb fetch failed for %s", worker["name"])
+        kb = []
+
+    if not kb:
+        return (
+            f"hey {first} — nothing logged in your tools/processes notes yet. "
+            f"any time you mention a tool, sheet, or process in a check-in, "
+            f"i'll capture it. or say 'share a process' and walk me through one."
+        )
+
+    # Group by Kind
+    by_kind: dict[str, list[dict]] = {}
+    for k in kb:
+        kind = (k.get("Kind") or "other").strip().lower()
+        by_kind.setdefault(kind, []).append(k)
+
+    KIND_LABEL = {
+        "software": ":computer: software", "tool": ":wrench: tools",
+        "sheet": ":bar_chart: sheets", "doc": ":page_facing_up: docs",
+        "process": ":repeat: processes", "workflow": ":repeat: workflows",
+        "platform": ":globe_with_meridians: platforms",
+        "person": ":bust_in_silhouette: people you coordinate with",
+        "link": ":link: links", "job": ":briefcase: jobs/tasks",
+        "compliance": ":scales: compliance/policies",
+        "other": ":small_blue_diamond: other",
+    }
+
+    lines = [f"here's what i've got logged about your workflow, {first}:", ""]
+    for kind in ("job", "process", "workflow", "software", "tool", "sheet",
+                  "doc", "platform", "person", "link", "compliance", "other"):
+        if kind not in by_kind:
+            continue
+        label = KIND_LABEL.get(kind, kind)
+        lines.append(f"*{label}:*")
+        for k in by_kind[kind]:
+            name_ = (k.get("Name") or "").strip()
+            desc = (k.get("Description") or "").strip()
+            url = (k.get("URL") or "").strip()
+            lines.append(f"  • *{name_}*")
+            if desc:
+                lines.append(f"      {desc[:200]}")
+            if url:
+                lines.append(f"      _link: {url[:120]}_")
+        lines.append("")
+
+    lines.append(
+        "_if anything's wrong or you want to add detail, just tell me — "
+        "e.g. 'actually the inventory sheet is for Lance not me' or 'the editor i use is CapCut not Premiere'._"
+    )
+    return "\n".join(lines)
 
 
 def _format_learned_today() -> str:
@@ -1126,6 +1255,85 @@ def handle_message(event, client) -> None:
     # Worker query: balance check (vacation/sick/pto days left)
     if _timeoff_balance_query_re.search(text):
         _handle_balance_query(user_id, client, worker)
+        return
+
+    # Worker asks about their OWN history: "what did i do today", "my trail",
+    # "my activity", "what have i been doing". Detect 'yesterday' vs 'today'.
+    if _worker_self_history_re.search(text):
+        days_back = 1 if re.search(r"\byesterday\b", text, re.IGNORECASE) else 0
+        try:
+            client.chat_postMessage(channel=user_id, text=_format_self_history(worker, days_back=days_back))
+        except Exception as e:
+            log.exception("self-history failed for %s", worker["name"])
+            client.chat_postMessage(channel=user_id, text=f"hit an error pulling your trail: {e}")
+        return
+
+    # Worker asks "my tools" / "my notes" / "what have i told you about" /
+    # "what do you know about me" → list their Knowledge Base entries
+    # grouped by Kind.
+    if _worker_knowledge_query_re.search(text):
+        try:
+            client.chat_postMessage(channel=user_id, text=_format_worker_knowledge(worker))
+        except Exception as e:
+            log.exception("knowledge query failed for %s", worker["name"])
+            client.chat_postMessage(channel=user_id, text=f"hit an error pulling your notes: {e}")
+        return
+
+    # Worker explicitly wants to share a process: "let me share a process",
+    # "log this", "remember this". Sam prompts for content, sets a pending
+    # flag, and the next message gets force-captured.
+    if _worker_share_process_re.search(text):
+        PENDING_SHARE_CAPTURE[user_id] = datetime.now(timezone.utc)
+        try:
+            client.chat_postMessage(channel=user_id, text=(
+                f"go for it — drop the name, what it's for, the link if there is one, "
+                f"and any steps. i'll log it to your tools/processes notes 🙌"
+            ))
+        except Exception:
+            pass
+        sheets.append_event(worker["name"], user_id, "sam_share_capture_open",
+                             "asked worker to share process", worker["tz"])
+        return
+
+    # If the worker has a pending share-capture (they said "share a process"
+    # in the previous message and Sam asked them to drop it), force-extract
+    # whatever they just sent — even if it's short.
+    if user_id in PENDING_SHARE_CAPTURE:
+        PENDING_SHARE_CAPTURE.pop(user_id, None)
+        try:
+            existing = sheets.list_worker_knowledge(user_id)
+            items = analyzer.extract_knowledge_from_reply(
+                name=worker["name"],
+                reply_text=text,
+                asked_topic="worker_initiated_share",
+                existing_knowledge=existing,
+            )
+        except Exception:
+            log.exception("forced share capture failed for %s", worker["name"])
+            items = []
+        if items:
+            for it in items:
+                it["Worker"] = worker["name"]
+                it["Slack User ID"] = user_id
+                sheets.upsert_knowledge(it)
+            names = ", ".join((it.get("Name") or "").strip()[:40] for it in items if it.get("Name"))
+            try:
+                client.chat_postMessage(channel=user_id, text=(
+                    f"locked in 🙌 logged {names} to your tools/processes. "
+                    f"anything else you want to add about it, just drop it here."
+                ))
+            except Exception:
+                pass
+        else:
+            try:
+                client.chat_postMessage(channel=user_id, text=(
+                    "hmm, couldn't pull anything concrete out of that. could you give me "
+                    "a name (the tool/process) and one line on what it's for?"
+                ))
+            except Exception:
+                pass
+            # Re-arm so they can try again
+            PENDING_SHARE_CAPTURE[user_id] = datetime.now(timezone.utc)
         return
 
     # Worker (or admin asking about their own) checklist: "my tasks",

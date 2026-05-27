@@ -275,7 +275,7 @@ def analyze(name: str, login_local: str, eod_local: str, active_hours: float,
             name, login_local, eod_local, active_hours, help_count, missed, checkins,
             profile, knowledge, open_commitments=open_commitments,
         )
-        data = deep_brain.deep_json(_DAILY_SYSTEM_PROMPT, user_block, max_tokens=4000)
+        data = deep_brain.deep_json(_DAILY_SYSTEM_PROMPT, user_block, max_tokens=4096)
     except Exception as e:
         log.warning("Deep-brain daily analysis failed for %s: %s", name, e)
         return dict(EMPTY_DAILY)
@@ -720,7 +720,8 @@ Rules:
 - Output ONLY the JSON.
 """
     try:
-        data = _gemini_json(prompt, max_tokens=512)
+        # 4096 — Gemini 2.5 Flash thinking tokens; see _gemini_json docstring.
+        data = _gemini_json(prompt, max_tokens=4096)
     except Exception as e:
         log.warning("Time off parse failed: %s", e)
         return None
@@ -783,7 +784,7 @@ Rules:
 - Output ONLY the JSON.
 """
     try:
-        data = _gemini_json(prompt, max_tokens=2048)
+        data = _gemini_json(prompt, max_tokens=4096)
     except Exception as e:
         log.warning("Benefits parse failed: %s", e)
         return {}
@@ -843,7 +844,7 @@ Rules:
 - Output ONLY the JSON. No prose.
 """
     try:
-        data = _gemini_json(prompt, max_tokens=1024)
+        data = _gemini_json(prompt, max_tokens=4096)
     except Exception as e:
         log.warning("Failed to parse daily assignments: %s", e)
         return {}
@@ -968,7 +969,7 @@ Rules:
 - Output ONLY the JSON.
 """
     try:
-        data = _gemini_json(prompt, max_tokens=512)
+        data = _gemini_json(prompt, max_tokens=4096)
     except Exception as e:
         log.warning("check_relay_completion failed: %s", e)
         return []
@@ -1056,7 +1057,10 @@ Output ONLY the prompt text — no quotes, no preamble, no JSON.
         resp = client.models.generate_content(
             model=config.GEMINI_MODEL,
             contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.8, max_output_tokens=300),
+            # 4096 — Flash thinking tokens eat the budget; we only need ~50
+            # tokens of actual output but reasoning can use 1-3K. See
+            # _gemini_json docstring.
+            config=types.GenerateContentConfig(temperature=0.8, max_output_tokens=4096),
         )
         reply = (resp.text or "").strip()
         if not reply:

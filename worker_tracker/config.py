@@ -382,6 +382,39 @@ TASK_LIST_ADMIN_PATTERNS = (
 )
 
 
+WORKER_SELF_HISTORY_PATTERNS = (
+    # "what did I do today/yesterday" / "my activity" / "my trail"
+    r"\bwhat\s+did\s+i\s+(?:do|work\s+on|accomplish|finish|knock\s+out|get\s+done)\b",
+    r"\bwhat\s+(?:have|'?ve)\s+i\s+(?:done|been\s+(?:doing|working\s+on))\b",
+    r"\b(?:my|show\s+my)\s+(?:activity|trail|recap|check[-\s]?ins|history)\b",
+    r"\b(?:show|give)\s+me\s+my\s+(?:day|today|yesterday|activity|trail|recap)\b",
+    r"\bwhat'?s\s+my\s+(?:trail|recap|activity|history)\b",
+    r"\brecap\s+(?:my|of\s+my)\s+(?:day|today|yesterday)\b",
+)
+
+WORKER_KNOWLEDGE_QUERY_PATTERNS = (
+    # "what tools have i shared" / "my notes" / "show my processes" /
+    # "what have i told you about" / "my knowledge"
+    r"\bwhat\s+(?:tools?|processes?|sheets?|notes?|knowledge|stuff)\s+(?:have\s+i|did\s+i|do\s+i)\b",
+    r"\bwhat\s+(?:have|'?ve)\s+i\s+(?:told|shown|shared|sent)\s+you\b",
+    r"\b(?:my|show\s+my)\s+(?:tools?|notes?|knowledge|processes?|tool[-\s]list|workflow)\b",
+    r"\bwhat\s+do\s+you\s+(?:know|have)\s+(?:about|on)\s+me\b",
+    r"\bwhat'?s\s+(?:in\s+)?my\s+(?:knowledge|notes|profile|tool[-\s]list)\b",
+)
+
+WORKER_SHARE_PROCESS_PATTERNS = (
+    # Worker explicitly wants Sam to log a tool / process — triggers a
+    # focused capture flow where Sam asks "go ahead, what is it?" and
+    # then force-extracts knowledge from the next message.
+    r"\b(?:let\s+me\s+)?(?:share|tell\s+you\s+about|log|save|remember|record|add|note)\s+(?:a\s+|the\s+|this\s+|new\s+|my\s+)?(?:process|tool|sheet|doc|workflow|task|software|process|routine)\b",
+    r"\b(?:i\s+(?:want|need|wanna)\s+to)\s+(?:share|log|save|tell)\b",
+    r"\bremember\s+this\b",
+    r"\blog\s+this\b",
+    r"\bnew\s+(?:tool|sheet|process|doc)\s+(?:for\s+me\b|i\s+use\b)",
+    r"\badd\s+(?:a\s+|this\s+)?(?:tool|sheet|process)\s+to\s+(?:my|the)\s+(?:notes|list|knowledge)\b",
+)
+
+
 ADMIN_LEARNED_PATTERNS = (
     # Admin asks "what did you learn today" / "what did you find out" /
     # "what's new" — wants a summary of what Sam captured from check-ins
