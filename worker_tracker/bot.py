@@ -228,17 +228,37 @@ def _find_worker_by_name(query: str) -> list[dict]:
 
 
 def _worker_today_snapshot(worker: dict) -> dict:
-    """Compute today's open-session state + hours-so-far for one worker.
-    Returns dict with: state, login_ts, eod_ts, last_checkin_ts, last_checkin_msg,
-    break_start_ts, hours_so_far_today, today_checkins (list of strings).
+    """Compute the worker's CURRENT OPEN SHIFT state + hours-so-far.
+
+    A "shift" is defined by an unbroken login → eod span, NOT by a calendar
+    day. This matters for workers like Ger whose 10pm-6am PHT shift crosses
+    midnight — her shift starts on day N and ends on day N+1 in her TZ.
+    The old code keyed on _local_today() which gave a different answer at
+    23:59 vs 00:01 for the SAME ongoing session.
+
+    Algorithm: scan the past 2 days of activity for this worker, walk
+    chronologically. Track the most recent login as the shift start; reset
+    state on each eod. The "current shift" is whatever's open at the end
+    of the walk. hours_so_far = (now - shift_login) - sum(breaks).
+
+    Returns: state, login_ts, eod_ts, last_checkin_ts, last_checkin_msg,
+    break_start_ts, hours_so_far_today, today_checkins.
+    (Field name "today_checkins" kept for compat — they're really
+    current-shift checkins.)
     """
     try:
         tz = ZoneInfo(worker["tz"])
     except Exception:
         tz = ZoneInfo("UTC")
-    today = datetime.now(tz).date().isoformat()
-    rows = [r for r in sheets.activity_rows(today) if r.get("Slack User ID") == worker["user_id"]]
-    rows.sort(key=lambda r: r.get("Timestamp UTC", ""))
+
+    # Pull 2 days of activity to capture cross-midnight shifts. Slightly
+    # heavier than a single-day read but cached at the sheets layer.
+    try:
+        recent = sheets.activity_since(2, slack_user_id=worker["user_id"])
+    except Exception:
+        log.exception("snapshot: activity fetch failed for %s", worker["name"])
+        recent = []
+    recent.sort(key=lambda r: r.get("Timestamp UTC", ""))
 
     login_ts = eod_ts = last_checkin_ts = None
     last_checkin_msg = ""
@@ -246,7 +266,7 @@ def _worker_today_snapshot(worker: dict) -> dict:
     state = "not_started"
     today_checkins: list[str] = []
     total_break_seconds = 0.0
-    for r in rows:
+    for r in recent:
         try:
             ts = datetime.fromisoformat(r["Timestamp UTC"]).astimezone(timezone.utc)
         except Exception:
@@ -254,7 +274,23 @@ def _worker_today_snapshot(worker: dict) -> dict:
         t = r.get("Type", "")
         msg = r.get("Message", "")
         if t == "login":
-            login_ts = login_ts or ts
+            # A fresh login STARTS a new shift — but ONLY if it's truly a
+            # new shift. If we already have an open login (no eod yet) and
+            # the gap is small (< 8h), this is a duplicate-login glitch
+            # (e.g. Ger's midnight-rollover bug before the continuation fix
+            # landed). Keep the ORIGINAL login_ts as the shift start.
+            if (login_ts is not None and eod_ts is None
+                    and (ts - login_ts).total_seconds() < 8 * 3600):
+                # Treat as continuation — ignore this duplicate login event
+                state = "working"
+                continue
+            login_ts = ts
+            eod_ts = None
+            break_start_ts = None
+            total_break_seconds = 0.0
+            today_checkins = []
+            last_checkin_ts = None
+            last_checkin_msg = ""
             state = "working"
         elif t == "eod":
             eod_ts = ts
@@ -276,13 +312,14 @@ def _worker_today_snapshot(worker: dict) -> dict:
             break_start_ts = None
             state = "working"
 
-    # Compute hours so far today
+    # Hours so far in the current open shift (whether shift started today
+    # or yesterday). For closed shifts (eod_ts set), this is the final
+    # duration; for open shifts, it's "right now minus shift start".
     hours_so_far = 0.0
     if login_ts:
         end_ts = eod_ts or datetime.now(timezone.utc)
         elapsed = (end_ts - login_ts).total_seconds()
         break_seconds = total_break_seconds
-        # If currently on break, count time-on-break-so-far too
         if break_start_ts and state == "on_break":
             break_seconds += (datetime.now(timezone.utc) - break_start_ts).total_seconds()
         hours_so_far = max(0.0, round((elapsed - break_seconds) / 3600.0, 2))
@@ -301,27 +338,96 @@ def _worker_today_snapshot(worker: dict) -> dict:
 
 
 def _format_self_history(worker: dict, days_back: int = 0) -> str:
-    """Return a worker's own activity trail. days_back=0 = today, 1 = yesterday."""
+    """Return a worker's activity trail for their CURRENT or LAST shift.
+
+    days_back=0 = current/most recent shift (may have started yesterday for
+    cross-midnight workers like Ger). days_back=1 = the shift before that.
+    A "shift" is login → eod (or now if still open), regardless of date.
+    """
     from datetime import datetime as _dt, timedelta as _td
     first = worker["name"].split()[0] if worker["name"] else "you"
+
+    # Pull a wider window so we can find the right shift even if it crossed days
+    try:
+        all_recent = sheets.activity_since(7, slack_user_id=worker["user_id"])
+    except Exception:
+        log.exception("self-history fetch failed for %s", worker["name"])
+        all_recent = []
+    all_recent.sort(key=lambda r: r.get("Timestamp UTC", ""))
+
+    # Walk events forward, building a list of shifts (login→eod or login→now).
+    # If we see a second login while still in an open shift AND the gap is
+    # small (< 8h), treat it as a duplicate (cross-midnight glitch) and
+    # keep it in the same shift bucket.
+    shifts: list[list[dict]] = []
+    current: list[dict] = []
+    last_login_ts = None
+    for r in all_recent:
+        t = r.get("Type", "")
+        ts_raw = r.get("Timestamp UTC", "")
+        if t == "login":
+            try:
+                this_login = _dt.fromisoformat(str(ts_raw))
+                if this_login.tzinfo is None:
+                    this_login = this_login.replace(tzinfo=timezone.utc)
+            except Exception:
+                this_login = None
+            if (current and last_login_ts is not None and this_login is not None
+                    and (this_login - last_login_ts).total_seconds() < 8 * 3600):
+                # Duplicate login within 8h — fold into current shift
+                current.append(r)
+                last_login_ts = this_login
+                continue
+            if current:
+                shifts.append(current)
+            current = [r]
+            last_login_ts = this_login
+        else:
+            if current:
+                current.append(r)
+            if t == "eod":
+                shifts.append(current)
+                current = []
+                last_login_ts = None
+    if current:
+        shifts.append(current)
+
+    if not shifts:
+        return f"hey {first} — no shifts on record. message me anything to clock in."
+
+    # days_back=0 → most recent shift; days_back=1 → one before that; etc.
+    idx = len(shifts) - 1 - days_back
+    if idx < 0:
+        return f"hey {first} — couldn't find a shift that far back. you've got {len(shifts)} on record."
+
+    events = [
+        r for r in shifts[idx]
+        if r.get("Type") in ("login", "checkin", "help_request",
+                              "break_start", "break_end", "eod")
+    ]
+
+    # Label: figure out whether this shift's dominant date is today or yesterday
     try:
         tz = ZoneInfo(worker["tz"])
     except Exception:
         tz = ZoneInfo("UTC")
-    target_date = (_dt.now(tz).date() - _td(days=days_back)).isoformat()
-    when_label = "today" if days_back == 0 else ("yesterday" if days_back == 1 else target_date)
-
-    try:
-        events = [
-            r for r in sheets.activity_rows(target_date)
-            if r.get("Slack User ID") == worker["user_id"]
-            and r.get("Type") in ("login", "checkin", "help_request",
-                                    "break_start", "break_end", "eod")
-        ]
-    except Exception:
-        log.exception("self-history fetch failed for %s", worker["name"])
-        events = []
-    events.sort(key=lambda r: r.get("Timestamp UTC", ""))
+    if events:
+        try:
+            login_ts = _dt.fromisoformat(str(events[0].get("Timestamp UTC", "")))
+            if login_ts.tzinfo is None:
+                login_ts = login_ts.replace(tzinfo=timezone.utc)
+            login_local = login_ts.astimezone(tz)
+            today_local = _dt.now(tz).date()
+            if login_local.date() == today_local:
+                when_label = "today"
+            elif login_local.date() == today_local - _td(days=1):
+                when_label = "the shift that started yesterday"
+            else:
+                when_label = f"the shift starting {login_local.date().isoformat()}"
+        except Exception:
+            when_label = "your last shift"
+    else:
+        when_label = "your last shift"
 
     if not events:
         return f"hey {first} — no activity logged {when_label} ({target_date}). either you weren't on or messages didn't make it through."
@@ -1532,75 +1638,89 @@ def handle_message(event, client) -> None:
     # a "first message of the day = login" trigger. This prevents the bug
     # where Jan typed "give this link when ger logs in..." and Sam replied
     # with the new-worker login welcome instead of queuing the relay.
-    if user_id in config.OWNER_SLACK_IDS:
-        pass  # skip login path entirely for owners
-    else:
-        # ── Stale-session auto-EOD ──
-        # Some workers (e.g. Ger on a 10pm-6am PHT shift) have shifts that
-        # cross midnight, so the END of yesterday's shift and the START
-        # of today's shift can fall on the SAME calendar date in their TZ.
-        # If we see a "login" message but there's already a login from
-        # earlier today with no EOD AND the gap since last activity is
-        # large (>= 4h), auto-write an EOD at the last activity timestamp
-        # before starting the new session. Otherwise the two shifts
-        # collapse into one and hours go haywire.
+    # ── Shift continuity: detect cross-midnight ongoing shifts ──
+    # For workers whose shifts span midnight (e.g. Ger's 10pm-6am PHT),
+    # the calendar date rolls over mid-shift in their TZ. The old code
+    # treated their post-midnight message as a brand-new login,
+    # creating a duplicate login event and breaking hours math.
+    #
+    # New behavior: look at the past 2 days of activity. If the most
+    # recent login (any date) is more recent than the most recent eod,
+    # they're already in an open session — treat this message as a
+    # continuation, NOT a new login.
+    #
+    # The only exception: if the gap since the worker's last activity
+    # is >= 8h, we treat the old session as abandoned and auto-EOD it
+    # before starting fresh. (8h not 4h to avoid false-positives on
+    # long single breaks.)
+    is_continuation = False
+    if user_id not in config.OWNER_SLACK_IDS:
         try:
-            todays_events = [
-                r for r in sheets.activity_rows(today)
-                if r.get("Slack User ID") == user_id
-            ]
-            todays_events.sort(key=lambda r: r.get("Timestamp UTC", ""))
-            has_login = any(r.get("Type") == "login" for r in todays_events)
-            has_eod = any(r.get("Type") == "eod" for r in todays_events)
-            if has_login and not has_eod:
-                # Find the most recent non-Sam, non-prompt activity
-                last_active = None
-                for r in todays_events:
-                    t = r.get("Type", "")
-                    if t.startswith("sam_") or t == "prompt_sent":
-                        continue
+            recent = sheets.activity_since(2, slack_user_id=user_id)
+            recent.sort(key=lambda r: r.get("Timestamp UTC", ""))
+            last_login_ts = None
+            last_eod_ts = None
+            last_active_ts = None
+            for r in recent:
+                t = r.get("Type", "")
+                try:
+                    ts = datetime.fromisoformat(str(r.get("Timestamp UTC", "")))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                except Exception:
+                    continue
+                if t == "login":
+                    last_login_ts = ts
+                elif t == "eod":
+                    last_eod_ts = ts
+                if not t.startswith("sam_") and t != "prompt_sent":
+                    last_active_ts = ts
+
+            session_open = (
+                last_login_ts is not None
+                and (last_eod_ts is None or last_login_ts > last_eod_ts)
+            )
+            if session_open and last_active_ts is not None:
+                gap_hours = (datetime.now(timezone.utc) - last_active_ts).total_seconds() / 3600
+                if gap_hours >= 8:
+                    # Session abandoned — auto-EOD the old one before fresh login
                     try:
-                        ts = datetime.fromisoformat(str(r.get("Timestamp UTC", "")))
-                        if ts.tzinfo is None:
-                            ts = ts.replace(tzinfo=timezone.utc)
-                        last_active = ts
+                        tz = ZoneInfo(worker["tz"])
+                    except Exception:
+                        tz = ZoneInfo("UTC")
+                    local = last_active_ts.astimezone(tz)
+                    ws = sheets.open_tracker().worksheet(config.ACTIVITY_TAB)
+                    ws.append_row([
+                        last_active_ts.isoformat(timespec="seconds"),
+                        local.date().isoformat(),
+                        local.strftime("%H:%M:%S"),
+                        worker["name"], user_id, "eod",
+                        f"auto-EOD: {gap_hours:.1f}h gap before new login",
+                    ], value_input_option="USER_ENTERED")
+                    try:
+                        sheets.activity_rows.invalidate()  # type: ignore[attr-defined]
+                        sheets.activity_since.invalidate()  # type: ignore[attr-defined]
                     except Exception:
                         pass
-                if last_active is not None:
-                    gap_hours = (datetime.now(timezone.utc) - last_active).total_seconds() / 3600
-                    if gap_hours >= 4:
-                        # Write an auto-EOD at last_active timestamp
-                        try:
-                            tz = ZoneInfo(worker["tz"])
-                        except Exception:
-                            tz = ZoneInfo("UTC")
-                        local = last_active.astimezone(tz)
-                        ws = sheets.open_tracker().worksheet(config.ACTIVITY_TAB)
-                        ws.append_row(
-                            [
-                                last_active.isoformat(timespec="seconds"),
-                                local.date().isoformat(),
-                                local.strftime("%H:%M:%S"),
-                                worker["name"],
-                                user_id,
-                                "eod",
-                                f"auto-EOD: {gap_hours:.1f}h gap before new login",
-                            ],
-                            value_input_option="USER_ENTERED",
-                        )
-                        try:
-                            sheets.activity_rows.invalidate()  # type: ignore[attr-defined]
-                            sheets.activity_since.invalidate()  # type: ignore[attr-defined]
-                        except Exception:
-                            pass
-                        log.info("Auto-EOD for %s: %.1fh gap before new login",
-                                 worker["name"], gap_hours)
-                        # Force LOGGED_IN_TODAY off so the new login below fires
-                        LOGGED_IN_TODAY.pop(user_id, None)
+                    log.info("Auto-EOD for %s: %.1fh gap before new login",
+                             worker["name"], gap_hours)
+                    LOGGED_IN_TODAY.pop(user_id, None)
+                    is_continuation = False
+                else:
+                    # Session truly open — this is a continuation, not a new login
+                    is_continuation = True
+                    # Keep LOGGED_IN_TODAY synced to current date so other code paths
+                    # don't think they're "not logged in today"
+                    LOGGED_IN_TODAY[user_id] = today
         except Exception:
-            log.exception("Stale-session auto-EOD check failed for %s", worker["name"])
+            log.exception("shift-continuity check failed for %s", worker["name"])
 
     if user_id in config.OWNER_SLACK_IDS:
+        pass
+    elif is_continuation:
+        # Don't fire welcome / create duplicate login event. The message
+        # will continue through the normal handlers (checkin, break, eod,
+        # conversational reply) below.
         pass
     elif LOGGED_IN_TODAY.get(user_id) != today:
         LOGGED_IN_TODAY[user_id] = today
