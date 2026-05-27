@@ -1103,6 +1103,40 @@ a small remote team (workers in the Philippines, manager in Vancouver). You're
 the workers' main contact for daily check-ins. Your tone is a thoughtful
 coworker, not a HR bot.
 
+WHAT YOU ACTUALLY DO (use this to answer 'what can you do' / 'do you X' /
+'will you Y' / 'how does Z work' style meta questions):
+- Time tracking: workers DM you to clock in, "break"/"lunch"/"brb" pauses
+  the clock, "back" resumes, "EOD" ends the day. Hours go to the Timesheet
+  tab for payroll on the 1st + 15th.
+- Periodic check-ins every 1.5-2h asking workers what they've knocked out
+  and if they're stuck. Their replies go to the Activity Log.
+- Daily EOD digest sent as a Slack DM to owners — per-worker summary
+  with hours, status, automation opportunities, and red flags.
+- Task relays: admin says "send this to ger" or "when hannah logs in
+  tell her to fix X" — you queue + deliver + track completion.
+- Commitment tracking: when a worker says "I'll have X done by 3pm" in
+  a check-in, you log it and follow up if it's still open the next day.
+- Follow-up questions about tools/processes: when a worker mentions a
+  software/tool/sheet/process you haven't catalogued, you ask a quick
+  follow-up to capture name + purpose, saved to the Knowledge Base tab.
+  Build a real workflow map of who uses what.
+- Worker profiles: every Sunday you synthesize each worker's past 7
+  days into a profile (role, recurring tasks, strengths, automation
+  backlog) on the Worker Profile tab.
+- Time off + benefits: workers can ask "how many vacation days do I
+  have left", you net allowed days vs used. Admins log time off via
+  "vacation for hannah dec 1-5". Annual reminders for HMO / perf
+  bonuses on Nov 15 + Jan 5.
+- Task lists: "my tasks" (worker) or "tasks for hannah" (admin)
+  shows open relays + commitments with age.
+- Team status: "did everyone log in" / "team status" / "who's
+  working" shows everyone's current state in one DM.
+- Status snapshot: "is X working" / "what did X do today" shows
+  one worker's hours, login, last check-in, today's trail.
+
+So if Jan asks "will you follow up on processes?" — YES, you do.
+Explain it. Don't redirect to a status command.
+
 WHO IS MESSAGING:
 {role_block}
 
@@ -1161,7 +1195,10 @@ RULES:
         resp = client.models.generate_content(
             model=config.GEMINI_MODEL,
             contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.6, max_output_tokens=1500),
+            # 4096 — Gemini 2.5 Flash thinking tokens were eating the old 1500
+            # budget, causing empty replies. Same bug class as we patched in
+            # _gemini_json, maybe_ask_followup, classify_admin_intent, etc.
+            config=types.GenerateContentConfig(temperature=0.6, max_output_tokens=4096),
         )
         reply = (resp.text or "").strip()
         if not reply or reply.upper() == "SKIP":

@@ -1287,14 +1287,61 @@ def handle_message(event, client) -> None:
                 # Gemini SKIPped but we MUST ack — fallback canned thanks
                 reply = f"thanks for the update {first}! 🙌"
             elif not reply and is_admin:
-                # Admin asked something Sam couldn't answer (Gemini SKIPped or errored).
-                # NEVER leave an admin in silence — they'll wonder if Sam is dead.
-                # Generic "I tried but couldn't" is far better than no response.
-                reply = (
-                    f"hmm, i don't have a great answer for that right now {first} — "
-                    f"could you try rephrasing? if you want a specific worker's status "
-                    f"try 'is <name> working' or 'what is <name> doing'."
-                )
+                # Admin asked something Sam couldn't answer (Gemini SKIPped
+                # or errored). NEVER leave an admin in silence. Try to give
+                # a CONTEXTUAL answer based on keywords in the question —
+                # much more useful than the old "could you try rephrasing".
+                low = text.lower()
+                if any(w in low for w in ("follow up", "followup", "remind", "remember",
+                                            "check in", "check-in", "process", "tool",
+                                            "knowledge")):
+                    reply = (
+                        f"yeah {first} — when workers mention tools or processes in "
+                        f"their check-ins, i ask a quick follow-up to capture name + "
+                        f"purpose, saved to the Knowledge Base tab. that builds a "
+                        f"real workflow map over time. anything specific you want me "
+                        f"to dig into?"
+                    )
+                elif any(w in low for w in ("task", "checklist", "todo", "to-do", "to do",
+                                              "commitment", "queue")):
+                    reply = (
+                        f"yeah — task relays ('send this to ger' / 'when hannah logs "
+                        f"in tell her X') get queued + delivered + i track completion. "
+                        f"worker self-promises go to the Commitments tab. say 'tasks "
+                        f"for <name>' to see open items, or 'my tasks' for your own."
+                    )
+                elif any(w in low for w in ("hour", "payroll", "pay", "timesheet",
+                                              "salary", "wage")):
+                    reply = (
+                        f"hours roll up automatically — login → break → eod tracked "
+                        f"per worker, totals to the Timesheet tab. payroll runs on "
+                        f"the 1st + 15th. say 'team status' for current state or "
+                        f"'is <name> working' for one worker."
+                    )
+                elif any(w in low for w in ("digest", "report", "email", "summary",
+                                              "eod report")):
+                    reply = (
+                        f"daily EOD digest ships to you as a Slack DM at the end of "
+                        f"each day — per-worker hours, status, automation ideas, red "
+                        f"flags. say 'send digest' to force one anytime."
+                    )
+                elif any(w in low for w in ("what can you", "what do you",
+                                              "what's your", "whats your",
+                                              "how do you", "your job")):
+                    reply = (
+                        f"main things: time tracking (login → break → eod), check-ins "
+                        f"every 1.5-2h, daily Slack digest, task relays, commitment "
+                        f"follow-ups, knowledge base of tools each worker uses, "
+                        f"weekly worker profile rebuild. ask 'team status' or "
+                        f"'my tasks' to see live data."
+                    )
+                else:
+                    reply = (
+                        f"hmm {first}, not sure i caught that — could you give me a "
+                        f"bit more to work with? if you want a specific worker's "
+                        f"status try 'is <name> working' / 'what did <name> do today', "
+                        f"or 'team status' / 'my tasks' to see the live state."
+                    )
             if reply:
                 _dm(client, user_id, reply, event_type="sam_chat")
         except Exception:
