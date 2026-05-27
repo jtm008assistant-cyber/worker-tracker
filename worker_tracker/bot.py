@@ -1153,31 +1153,80 @@ def restore_state() -> None:
         rows.sort(key=lambda r: r.get("Timestamp UTC", ""))
         logged_in = False
         on_break_since: datetime | None = None
+        # Track the most recent INTERACTION event (login / prompt_sent / checkin /
+        # help_request / break_end). The next prompt is anchored to this, not to
+        # boot time — so repeated deploys don't reset the worker's check-in cadence.
+        last_interaction: datetime | None = None
+
+        def _parse_ts(s) -> datetime | None:
+            try:
+                ts = datetime.fromisoformat(str(s))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                return ts
+            except Exception:
+                return None
+
         for r in rows:
             t = r.get("Type")
             if t == "login":
                 logged_in = True
-                on_break_since = None  # new login closes any stale break state
+                on_break_since = None
+                ts = _parse_ts(r.get("Timestamp UTC"))
+                if ts:
+                    last_interaction = ts
             elif t == "eod":
                 logged_in = False
                 on_break_since = None
             elif t == "break_start":
-                try:
-                    ts = datetime.fromisoformat(str(r.get("Timestamp UTC", "")))
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
+                ts = _parse_ts(r.get("Timestamp UTC"))
+                if ts:
                     on_break_since = ts
-                except Exception:
-                    pass
             elif t == "break_end":
                 on_break_since = None
+                ts = _parse_ts(r.get("Timestamp UTC"))
+                if ts:
+                    last_interaction = ts
+            elif t in ("prompt_sent", "checkin", "help_request"):
+                ts = _parse_ts(r.get("Timestamp UTC"))
+                if ts:
+                    last_interaction = ts
+
         if logged_in:
             LOGGED_IN_TODAY[user_id] = today
             if on_break_since is not None:
                 ON_BREAK[user_id] = on_break_since
                 log.info("Restored ON_BREAK for %s (since %s)", worker["name"], on_break_since.isoformat())
             else:
-                schedule_next_prompt(user_id)
+                # Schedule next prompt anchored to last interaction time. If
+                # already past the next-due moment, fire immediately (within 30s).
+                interval = _interval_for(user_id)
+                now_utc = datetime.now(timezone.utc)
+                if last_interaction:
+                    next_due = last_interaction + timedelta(minutes=interval)
+                else:
+                    next_due = now_utc + timedelta(minutes=interval)
+                if next_due <= now_utc:
+                    # Overdue — fire in 30s so the user gets a check-in
+                    # immediately after boot if we missed one.
+                    next_due = now_utc + timedelta(seconds=30)
+                    log.info("Restore: prompt OVERDUE for %s (last interaction %s, interval %dm) — firing in 30s",
+                             worker["name"],
+                             last_interaction.isoformat() if last_interaction else "n/a",
+                             interval)
+                else:
+                    log.info("Restore: next prompt for %s at %s (last interaction %s, interval %dm)",
+                             worker["name"], next_due.isoformat(),
+                             last_interaction.isoformat() if last_interaction else "n/a",
+                             interval)
+                # Replace any existing job for this user with the anchored one
+                job_id = f"prompt:{user_id}"
+                try:
+                    scheduler.remove_job(job_id)
+                except Exception:
+                    pass
+                scheduler.add_job(send_prompt, "date", run_date=next_due,
+                                  args=[user_id], id=job_id)
             log.info("Resumed active session for %s (on_break=%s)",
                      worker["name"], on_break_since is not None)
 
@@ -1324,6 +1373,80 @@ def schedule_stale_break_sweep() -> None:
         next_run_time=datetime.now(timezone.utc) + timedelta(minutes=5),
     )
     log.info("Stale break sweeper scheduled (hourly)")
+
+
+def ensure_prompts_scheduled() -> None:
+    """Watchdog: every 30 min, verify each logged-in worker has a pending
+    prompt job. If a job got lost (scheduler thread restart, missed deploy
+    restore, APScheduler hiccup), reschedule based on last interaction time.
+
+    This is the safety net behind restore_state — restore_state catches the
+    deploy case, this catches everything else (scheduler thread crash, the
+    `add_job` silently no-op'd, etc.). Result: Norks-style 'why didn't Sam
+    check on me' silence becomes impossible — worst case, the next 30-min
+    sweep notices and restores the check-in cadence.
+    """
+    now_utc = datetime.now(timezone.utc)
+    restored = 0
+    for user_id, worker in WORKERS.items():
+        if user_id not in LOGGED_IN_TODAY:
+            continue  # not active today
+        if user_id in ON_BREAK:
+            continue  # on break — prompts are paused
+        job_id = f"prompt:{user_id}"
+        try:
+            existing = scheduler.get_job(job_id)
+        except Exception:
+            existing = None
+        if existing:
+            continue  # already scheduled, all good
+
+        # Job is missing — reschedule. Anchor to last interaction.
+        try:
+            today = _local_today(worker)
+            rows = [r for r in sheets.activity_rows(today)
+                    if r.get("Slack User ID") == user_id
+                    and r.get("Type") in ("login", "checkin", "help_request",
+                                           "break_end", "prompt_sent")]
+            rows.sort(key=lambda r: r.get("Timestamp UTC", ""))
+            last_interaction = None
+            if rows:
+                try:
+                    last_interaction = datetime.fromisoformat(str(rows[-1].get("Timestamp UTC", "")))
+                    if last_interaction.tzinfo is None:
+                        last_interaction = last_interaction.replace(tzinfo=timezone.utc)
+                except Exception:
+                    pass
+        except Exception:
+            log.exception("ensure_prompts_scheduled: activity read failed for %s", worker["name"])
+            continue
+
+        interval = _interval_for(user_id)
+        if last_interaction:
+            next_due = last_interaction + timedelta(minutes=interval)
+        else:
+            next_due = now_utc + timedelta(minutes=interval)
+        if next_due <= now_utc:
+            next_due = now_utc + timedelta(seconds=30)
+        scheduler.add_job(send_prompt, "date", run_date=next_due,
+                          args=[user_id], id=job_id)
+        log.warning("ensure_prompts_scheduled: RESTORED missing prompt job for %s — next at %s",
+                    worker["name"], next_due.isoformat())
+        restored += 1
+    if restored:
+        log.info("ensure_prompts_scheduled: restored %d missing prompt job(s)", restored)
+
+
+def schedule_prompt_watchdog() -> None:
+    """Run ensure_prompts_scheduled every 30 minutes."""
+    scheduler.add_job(
+        ensure_prompts_scheduled,
+        "interval",
+        minutes=30,
+        id="prompt_watchdog",
+        next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    log.info("Prompt watchdog scheduled (every 30 min)")
 
 
 def schedule_daily_digest() -> None:
@@ -2058,6 +2181,7 @@ def main() -> None:
     schedule_pre_payroll_reviews()
     schedule_daily_planning()
     schedule_stale_break_sweep()
+    schedule_prompt_watchdog()
     schedule_benefits_reminders()
     log.info("Starting Socket Mode handler. Ctrl-C to stop.")
     SocketModeHandler(_app, config.SLACK_APP_TOKEN).start()
