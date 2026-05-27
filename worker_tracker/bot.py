@@ -1326,6 +1326,74 @@ def handle_message(event, client) -> None:
     # with the new-worker login welcome instead of queuing the relay.
     if user_id in config.OWNER_SLACK_IDS:
         pass  # skip login path entirely for owners
+    else:
+        # ── Stale-session auto-EOD ──
+        # Some workers (e.g. Ger on a 10pm-6am PHT shift) have shifts that
+        # cross midnight, so the END of yesterday's shift and the START
+        # of today's shift can fall on the SAME calendar date in their TZ.
+        # If we see a "login" message but there's already a login from
+        # earlier today with no EOD AND the gap since last activity is
+        # large (>= 4h), auto-write an EOD at the last activity timestamp
+        # before starting the new session. Otherwise the two shifts
+        # collapse into one and hours go haywire.
+        try:
+            todays_events = [
+                r for r in sheets.activity_rows(today)
+                if r.get("Slack User ID") == user_id
+            ]
+            todays_events.sort(key=lambda r: r.get("Timestamp UTC", ""))
+            has_login = any(r.get("Type") == "login" for r in todays_events)
+            has_eod = any(r.get("Type") == "eod" for r in todays_events)
+            if has_login and not has_eod:
+                # Find the most recent non-Sam, non-prompt activity
+                last_active = None
+                for r in todays_events:
+                    t = r.get("Type", "")
+                    if t.startswith("sam_") or t == "prompt_sent":
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(str(r.get("Timestamp UTC", "")))
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        last_active = ts
+                    except Exception:
+                        pass
+                if last_active is not None:
+                    gap_hours = (datetime.now(timezone.utc) - last_active).total_seconds() / 3600
+                    if gap_hours >= 4:
+                        # Write an auto-EOD at last_active timestamp
+                        try:
+                            tz = ZoneInfo(worker["tz"])
+                        except Exception:
+                            tz = ZoneInfo("UTC")
+                        local = last_active.astimezone(tz)
+                        ws = sheets.open_tracker().worksheet(config.ACTIVITY_TAB)
+                        ws.append_row(
+                            [
+                                last_active.isoformat(timespec="seconds"),
+                                local.date().isoformat(),
+                                local.strftime("%H:%M:%S"),
+                                worker["name"],
+                                user_id,
+                                "eod",
+                                f"auto-EOD: {gap_hours:.1f}h gap before new login",
+                            ],
+                            value_input_option="USER_ENTERED",
+                        )
+                        try:
+                            sheets.activity_rows.invalidate()  # type: ignore[attr-defined]
+                            sheets.activity_since.invalidate()  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        log.info("Auto-EOD for %s: %.1fh gap before new login",
+                                 worker["name"], gap_hours)
+                        # Force LOGGED_IN_TODAY off so the new login below fires
+                        LOGGED_IN_TODAY.pop(user_id, None)
+        except Exception:
+            log.exception("Stale-session auto-EOD check failed for %s", worker["name"])
+
+    if user_id in config.OWNER_SLACK_IDS:
+        pass
     elif LOGGED_IN_TODAY.get(user_id) != today:
         LOGGED_IN_TODAY[user_id] = today
         sheets.append_event(worker["name"], user_id, "login", text, worker["tz"])
@@ -1354,10 +1422,33 @@ def handle_message(event, client) -> None:
             except Exception:
                 log.exception("Failed to provision view sheet for %s", worker["name"])
 
-        # On the very first login (no profile yet), ask their usual schedule.
-        # On subsequent logins, skip — we already have it.
+        # On the very first login (no profile yet AND no prior schedule
+        # answer in the Activity Log), ask their usual schedule. On
+        # subsequent logins, skip — either Profile has it OR the worker
+        # already told us in a recent check-in (the weekly synth cron
+        # might not have written the Profile row yet, but the answer
+        # is still on file in the Activity Log).
         schedule_q = ""
-        if not sheets.load_profile(user_id):
+        already_answered_schedule = False
+        try:
+            recent = sheets.activity_since(14, slack_user_id=user_id)
+            schedule_kw = re.compile(
+                r"\b(?:start\s+my\s+day|usual\s+schedule|i\s+(?:start|work|begin)|"
+                r"\d{1,2}\s*(?:am|pm|:\d{2})|monday|tuesday|wednesday|thursday|"
+                r"friday|saturday|sunday|weekdays?|weekends?|mon-fri|m-f|"
+                r"PHT|EST|PST|UTC|MNL\s*time|vancouver\s*time)\b",
+                re.IGNORECASE,
+            )
+            for r in recent:
+                if r.get("Type") not in ("checkin", "help_request"):
+                    continue
+                msg = (r.get("Message") or "").strip()
+                if len(msg) >= 8 and schedule_kw.search(msg):
+                    already_answered_schedule = True
+                    break
+        except Exception:
+            log.exception("Schedule lookup failed for %s", worker["name"])
+        if not sheets.load_profile(user_id) and not already_answered_schedule:
             schedule_q = " btw, what's your usual schedule? roughly when do you start and wrap up most days?"
 
         # If Jan sent a focus assignment for this worker last evening, relay it.
