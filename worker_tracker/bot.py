@@ -110,19 +110,51 @@ def is_discrepancy(text: str) -> bool:
 
 
 def _format_hours_summary(worker: dict) -> str:
-    """Compute and format this worker's current pay-period hours for them."""
+    """Compute and format this worker's current pay-period hours for them.
+
+    Daily Summary only gets written at EOD. So if a worker asks 'hours' mid-shift
+    BEFORE they EOD, period totals from the Summary tab will under-count today's
+    open session by 0-12h. We compensate by computing today's open-session hours
+    from the Activity Log and adding them on top — same trick the admin status
+    snapshot uses. Without this, Ger asks 'hours' at 5:39 AM and Sam says
+    'nothing to show yet' even though she's been clocked in for hours.
+    """
     start, end = payroll.current_open_period()
     totals = payroll.worker_period_totals(worker, start, end)
     first = worker["name"].split()[0] if worker["name"] else "you"
-    if totals["total_hours"] == 0:
+
+    # Pull today's open-session hours from the live snapshot
+    hours_today_open = 0.0
+    today_state = ""
+    try:
+        snap = _worker_today_snapshot(worker)
+        today_state = snap.get("state", "")
+        if today_state in ("working", "on_break", "logged_off"):
+            hours_today_open = float(snap.get("hours_so_far_today") or 0.0)
+    except Exception:
+        log.exception("_format_hours_summary: snapshot failed for %s", worker["name"])
+
+    # If they've EOD'd, Daily Summary already has today's hours; don't double-count.
+    today_adjustment = hours_today_open if today_state in ("working", "on_break") else 0.0
+    period_total = (totals.get("total_hours") or 0.0) + today_adjustment
+
+    if period_total == 0:
         return f"hey {first}, no hours logged yet for this period ({start} → {end}). nothing to show yet 👀"
+
     ot_line = ""
-    if totals["overtime_hours"]:
+    if totals.get("overtime_hours"):
         ot_line = f" ({totals['regular_hours']}h regular + {totals['overtime_hours']}h OT)"
+
+    today_line = ""
+    if today_adjustment > 0:
+        today_line = f"\n• {today_adjustment:.2f}h on the clock right now (today, not yet in payroll totals)"
+
     return (
-        f"hey {first} — pay period {start} → {end} so far:\n"
-        f"• {totals['days_worked']} days worked\n"
-        f"• {totals['total_hours']}h total{ot_line}\n\n"
+        f"hey {first} — pay period {start} → {end}:\n"
+        f"• {totals.get('days_worked', 0)} days completed\n"
+        f"• {totals.get('total_hours', 0)}h from completed days{ot_line}"
+        f"{today_line}\n"
+        f"• *{period_total:.2f}h total* (incl. today)\n\n"
         f"if anything looks off (missed a break, missed a login, etc.), just message me with details "
         f"and I'll flag it for review before payroll."
     )
