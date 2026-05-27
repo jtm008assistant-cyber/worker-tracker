@@ -291,7 +291,14 @@ TIMEOFF_BALANCE_QUERY_PATTERNS = (
 #   "dm hannah: nice work today"
 #   "message Rey - check in pls"
 ADMIN_FORWARD_PATTERNS = (
-    r"^(?:send|dm|message|tell|forward)\s+(?:to\s+)?([A-Za-z][\w'.-]*)\s*[:,;-]?\s+(.+)$",
+    # Strict "send to X: message" / "tell hannah, do X" — the captured
+    # name must NOT be a generic pronoun (this/that/it/the/etc.) otherwise
+    # phrases like "send this to ger <url>" get mis-parsed as a worker
+    # named "this". Generic pronouns route to the relay handler below
+    # (which uses Gemini and correctly identifies the actual worker).
+    r"^(?:send|dm|message|tell|forward)\s+(?:to\s+)?"
+    r"(?!(?:this|that|it|the|them|these|those|him|her|a|an|over|out)\b)"
+    r"([A-Za-z][\w'.-]*)\s*[:,;-]?\s+(.+)$",
 )
 
 # Ad-hoc deferred relay — admin asks Sam to deliver something the NEXT TIME
@@ -303,6 +310,7 @@ ADMIN_FORWARD_PATTERNS = (
 # Pattern is intentionally loose — anything matching here goes through Gemini
 # parse_relay_request() to extract worker + task + optional time estimate.
 ADMIN_RELAY_PATTERNS = (
+    # ----- DEFERRED: "when X logs in, do Y" / "next time X is here" -----
     r"\bwhen\s+\w+\s+(?:logs?\s*in|clocks?\s*in|comes?\s+on(?:line)?|starts?|signs?\s*in|is\s+(?:on|online|available|here))\b",
     r"\bnext\s+time\s+\w+\s+(?:logs?|clocks?|signs?|is)\b",
     r"\b(?:tell|ask|have|remind|let)\s+\w+\s+(?:when|once|as soon as)\s+(?:she|he|they|s?he)\s+(?:logs?|clocks?|signs?|is|comes?|gets?)\b",
@@ -312,6 +320,16 @@ ADMIN_RELAY_PATTERNS = (
     r"\bwhen\s+(?:s?he|they|he|she)'?\s*s?\s*(?:is\s+)?(?:on(?:line)?|here|available|back|free|around)\b",
     # Imperative-style with separated "when" clause: "have rey upload thumbs when hes online"
     r"\b(?:tell|ask|have|remind|let)\s+\w+\b[^.\n]{0,120}?\bwhen\s+(?:s?he|they|he|she|\w+)'?s?\b",
+
+    # ----- IMMEDIATE: "send this to X" / "give X this link" / "share with X" -----
+    # These don't have a "when" clause — admin wants delivery now (or as
+    # soon as worker is online). Routes through the same handler, which
+    # delivers immediately if the worker is already clocked in.
+    # Catches: "send this to ger", "send ger this link", "give ger this",
+    #          "share with hannah", "forward to rey", "shoot this to norks"
+    r"\b(?:send|give|share|forward|shoot|pass|drop)\s+(?:this|that|it|the|these|those)\s+(?:link|message|note|file|doc|sheet|info|update)?\s*(?:to|with|over to)\s+\w+\b",
+    r"\b(?:send|give|share|forward|shoot|pass|drop)\s+\w+\s+(?:this|that|the|these|those)\b",
+    r"\b(?:send|forward|share|pass)\s+(?:to|with|over to)\s+\w+\b",
 )
 
 # Admins can ask "what is X doing" / "where's X" / "status of X" / etc.
