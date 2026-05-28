@@ -858,13 +858,11 @@ def agent_reply(
         log.warning("agent: client init failed: %s", e)
         return None
 
-    model_name = config.GEMINI_MODEL or "gemini-2.5-flash"
-    # Prefer Pro for the agent loop if available — better tool calling.
-    if "pro" not in model_name.lower() and "AGENT_MODEL_OVERRIDE" not in __import__("os").environ:
-        # Try Pro first, fall back to Flash on error
-        agent_model = "gemini-2.5-pro"
-    else:
-        agent_model = model_name
+    import os
+    # Default to Flash 2.5 (verified working, broadly available). Pro is
+    # available via AGENT_MODEL_OVERRIDE=gemini-2.5-pro env var if the
+    # project has it enabled.
+    agent_model = os.environ.get("AGENT_MODEL_OVERRIDE") or "gemini-2.5-flash"
 
     for iteration in range(max_iterations):
         try:
@@ -879,12 +877,16 @@ def agent_reply(
                 ),
             )
         except Exception as e:
-            log.warning("agent: gen call failed on iter %d: %s", iteration, e)
-            # On first iteration failure, retry with Flash if we tried Pro
-            if iteration == 0 and agent_model != model_name:
-                agent_model = model_name
-                continue
-            return None
+            log.warning("agent: gen call failed on iter %d (%s): %s",
+                        iteration, agent_model, e)
+            # Try the OTHER model on the first iteration if we haven't yet
+            if iteration == 0:
+                alt = "gemini-2.5-pro" if "flash" in agent_model.lower() else "gemini-2.5-flash"
+                if alt != agent_model:
+                    log.info("agent: retrying with %s", alt)
+                    agent_model = alt
+                    continue
+            return f"having trouble reaching gemini right now ({type(e).__name__}). try again in a sec?"
 
         if not resp.candidates:
             return None

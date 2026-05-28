@@ -1388,12 +1388,22 @@ def handle_message(event, client) -> None:
                     is_manager=is_manager,
                     workers=list(WORKERS.values()),
                 )
-            except Exception:
+            except Exception as e:
                 log.exception("agent crashed")
-                reply = None
-            if reply:
-                _dm(client, user_id, reply, event_type="sam_agent_reply")
-                return  # handled — done
+                reply = f"agent hit an error: {type(e).__name__}: {e}"
+            # The agent ALWAYS owns the response for admins. If it returns
+            # a non-empty string we send that. If it returns None or empty
+            # for any reason, we send a clear "stuck" message — but we
+            # DO NOT fall through to the legacy handlers / canned text.
+            # That's how the "yeah — task relays..." canned reply was
+            # leaking through and embarrassing us.
+            if not reply:
+                reply = (
+                    f"hmm — couldn't pull a clean answer this time. "
+                    f"can you rephrase or give me a specific worker name?"
+                )
+            _dm(client, user_id, reply, event_type="sam_agent_reply")
+            return  # ALWAYS return — agent owns admin replies
 
     # Daily planning reply — fires only if this user was sent the planning question.
     # Check BEFORE admin-command parsing so a free-form planning reply doesn't
