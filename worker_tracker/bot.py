@@ -1358,48 +1358,42 @@ def handle_message(event, client) -> None:
     is_admin = is_owner or is_manager
 
     # ─────────────────────────────────────────────────────────────────────
-    # LLM INTENT ROUTER (replaces the entire admin regex chain)
+    # TOOL-CALLING AGENT (replaces the entire admin intent dispatcher)
     # ─────────────────────────────────────────────────────────────────────
-    # One Gemini call classifies the admin's intent and resolves the worker
-    # name (with typo + nickname tolerance) — eliminating the entire class
-    # of "regex matched the wrong word in a long message" bugs.
-    # The Activity-Log-side worker handlers (login/break/eod/hours/discrepancy)
-    # still run as regex BEFORE this — they're sub-100ms and unambiguous.
-    # Only NON-worker-keyword admin messages go through the LLM router.
+    # For every non-worker-action message from an admin, run the agent loop.
+    # The agent has tools to look up real data (status, activity, KB,
+    # benefits, hours, tasks, team state, learned-today, roster) and write
+    # actions (log time off, queue message, save knowledge, send digest).
+    # It keeps conversation memory per speaker, so pronouns like "his",
+    # "her", "they", "yesterday's question" resolve naturally.
     if is_admin:
-        # Skip the LLM call for obvious worker-syntax messages from admin-workers
-        # (Hannah / Ger / etc.). Saves ~1s per message and a Gemini call.
         looks_like_worker_action = (
-            len(text.strip()) < 20 and
+            len(text.strip()) < 25 and
             (is_break_start(text) or is_break_end(text) or is_eod(text)
              or is_hours_query(text) or is_discrepancy(text)
              or text.strip().lower() in ("logging in", "login", "im in",
-                                            "i'm in", "starting", "hey",
-                                            "hi sam", "hello"))
+                                          "i'm in", "starting"))
         )
         if not looks_like_worker_action:
             try:
+                from . import agent as _agent
                 speaker_first = (worker["name"].split()[0]
                                   if worker and worker.get("name")
                                   else "admin")
-                intent_result = analyzer.route_admin_message(
-                    message=text,
-                    roster=list(WORKERS.values()),
+                reply = _agent.agent_reply(
+                    text=text,
+                    speaker_user_id=user_id,
+                    speaker_name=speaker_first,
                     is_owner=is_owner,
                     is_manager=is_manager,
-                    speaker_first_name=speaker_first,
+                    workers=list(WORKERS.values()),
                 )
             except Exception:
-                log.exception("LLM router crashed")
-                intent_result = None
-            if intent_result is not None:
-                log.info("LLM router: intent=%s worker=%s conf=%s",
-                         intent_result.get("intent"),
-                         intent_result.get("worker"),
-                         intent_result.get("confidence"))
-                if _dispatch_admin_intent(intent_result, user_id, text, client,
-                                            worker, is_owner, is_manager):
-                    return  # handled — done
+                log.exception("agent crashed")
+                reply = None
+            if reply:
+                _dm(client, user_id, reply, event_type="sam_agent_reply")
+                return  # handled — done
 
     # Daily planning reply — fires only if this user was sent the planning question.
     # Check BEFORE admin-command parsing so a free-form planning reply doesn't
