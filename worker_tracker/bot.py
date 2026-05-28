@@ -1876,7 +1876,17 @@ def handle_message(event, client) -> None:
         _dm(client, user_id,
             f"welcome back {first}! that was a {duration_min:.0f}min break — back on the clock 🙌",
             event_type="sam_resume_ack")
-        # Don't return — the current message also counts as a check-in (fall through)
+        # If the message was JUST a break-end ack (e.g. "back", "im back",
+        # "returning"), we're done — return so the conversational reply
+        # path doesn't fire on empty content and emit the admin fallback.
+        # If they wrote MORE than the resume keyword (e.g. "back, working
+        # on X"), fall through to treat the rest as a check-in.
+        stripped = text.strip().lower()
+        # Heuristic: short message + matches a break-end keyword = pure ack
+        if len(stripped) < 25 and is_break_end(text):
+            return
+        # Otherwise fall through — the message has substantive content past
+        # the resume keyword that deserves to be processed as a check-in.
 
     # If not on break, and the message looks like a break-start, pause them.
     elif is_break_start(text) and not is_eod(text):
@@ -2226,7 +2236,19 @@ def handle_message(event, client) -> None:
                 # or errored). NEVER leave an admin in silence. Try to give
                 # a CONTEXTUAL answer based on keywords in the question —
                 # much more useful than the old "could you try rephrasing".
-                low = text.lower()
+                low = text.lower().strip()
+                # Don't fire the admin fallback for short worker-action
+                # messages from admin-workers (Hannah/Ger) — "back" /
+                # "break" / "eod" / "ok" / "thanks" etc. already had their
+                # own ack. The conversational reply being empty is correct.
+                if (len(low) < 20 and (
+                    is_break_start(text) or is_break_end(text) or is_eod(text)
+                    or is_hours_query(text)
+                    or low in ("ok", "k", "kk", "thanks", "thx", "ty",
+                                "got it", "noted", "👍", "🙌", "thank you",
+                                "yes", "no", "sure", "cool")
+                )):
+                    return  # Worker keyword or simple ack — stay silent
                 if any(w in low for w in ("follow up", "followup", "remind", "remember",
                                             "check in", "check-in", "process", "tool",
                                             "knowledge")):
