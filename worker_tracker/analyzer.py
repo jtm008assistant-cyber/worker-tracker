@@ -1188,6 +1188,197 @@ Respond JSON ONLY:
     return "\n".join(lines)
 
 
+def route_admin_message(
+    message: str,
+    roster: list[dict],
+    is_owner: bool,
+    is_manager: bool,
+    speaker_first_name: str,
+) -> dict | None:
+    """The replacement for the entire admin regex routing layer.
+
+    One Gemini call classifies the admin's message into one of these intents
+    and extracts the relevant entities. The bot dispatches based on the
+    returned intent. This eliminates the entire class of "regex matched the
+    wrong word in a long message" bugs (Hannah's "onwards" / "my", Jan's
+    "tell Norks. ... is a test" / "send this to ger", etc.).
+
+    Returns:
+      {
+        "intent": "<one of the supported intents>",
+        "worker": "<exact roster name or null>",
+        "second_worker": "<for relays where 2 workers may be involved>",
+        "message_to_relay": "<for forward/relay intents>",
+        "estimated_time": "<for relay intents>",
+        "is_deferred": true/false,
+        "time_off": {"type": "...", "start_date": "...", "end_date": "...", "days": N},
+        "confidence": "high|medium|low",
+        "reasoning": "<one short sentence — for log/debug>"
+      }
+    or None on failure (caller should fall through to conversational reply).
+    """
+    if not config.GOOGLE_API_KEY or not message.strip():
+        return None
+
+    # Build a roster block the model can match against (handles typos, nicknames)
+    roster_lines: list[str] = []
+    for w in roster:
+        nicks = (w.get("nicknames") or [])
+        nick_str = f" (aka: {', '.join(nicks)})" if nicks else ""
+        roster_lines.append(f"- {w['name']}{nick_str}")
+    roster_block = "\n".join(roster_lines) if roster_lines else "(empty roster)"
+
+    role = "OWNER" if is_owner else ("MANAGER" if is_manager else "ADMIN")
+
+    prompt = f"""You are the intent router for Sam, the team's ops bot. The
+speaker ({speaker_first_name}, role={role}) just DM'd Sam. Classify the
+intent and extract the entities.
+
+ROSTER (match worker names against these — handle typos and nicknames):
+{roster_block}
+
+MESSAGE:
+\"\"\"{message.strip()}\"\"\"
+
+POSSIBLE INTENTS:
+
+1. "worker_status" — admin asking about ONE specific worker's current state
+   or what they did. e.g. "is jonny working", "what did hannah do today",
+   "watt did hanna do", "how is rey", "where's gerr". Set worker = the
+   matched roster name.
+
+2. "team_status" — admin asking about the WHOLE team. e.g. "did everyone log
+   in", "team status", "who's working", "is anyone on break", "how is
+   everyone doing".
+
+3. "task_list" — admin asking for ONE worker's open tasks/checklist.
+   e.g. "tasks for hannah", "hannahs tasks", "rey checklist", "what's on
+   ger's plate". Set worker.
+
+4. "forward" — admin wants to deliver a message to a worker IMMEDIATELY
+   (or as soon as worker is online). e.g. "tell rey to upload the new
+   thumbnails", "send this to ger https://...", "give hannah this doc",
+   "share with janina", "tell Norks the message is X". NOT a deferred
+   "when X logs in". Set worker + message_to_relay. is_deferred=false.
+
+5. "relay" — admin wants to deliver a message LATER, gated on the worker
+   logging in or coming online. e.g. "when hannah logs in, ask her to
+   pull the Q1 numbers", "next time rey clocks in tell him X", "tomorrow
+   when ger starts remind her about the wise account". Set worker +
+   message_to_relay + estimated_time. is_deferred=true.
+
+6. "automation_review" — admin wants automation candidates. e.g. "what can
+   we automate", "automation candidates", "what's ripe to automate",
+   "automation for hannah". worker is optional (per-worker scope).
+
+7. "learned_today" — admin asks what Sam captured today. e.g. "what did
+   you learn today", "what's new", "today's takeaways", "any new tools",
+   "what have you noticed".
+
+8. "digest_now" — admin wants today's EOD digest sent immediately.
+   e.g. "send digest", "EOD report", "send me the digest", "give me
+   today's digest".
+
+9. "time_off_log" — admin logging time off for a worker. e.g. "vacation
+   for hannah dec 1-5", "sick day for rey today". Set worker +
+   time_off{{type, start_date, end_date, days}}.
+
+10. "benefits_query" — admin asks Sam to follow up with someone (usually
+    Hannah) about benefits. e.g. "ask hannah about benefits".
+
+11. "drive_audit" — admin requests Drive audit. e.g. "audit the drive",
+    "drive review", "what's in the drive folder".
+
+12. "intro_everyone" — owner wants Sam to introduce itself to the team.
+    e.g. "introduce yourself to everyone", "broadcast intro".
+
+13. "share_capture" — admin/worker explicitly wants to log a tool/process.
+    e.g. "let me share a process", "log this", "remember this", "i want
+    to log a new tool".
+
+14. "self_history" — admin asking about their own activity. e.g. "what
+    did i do today", "my activity", "my trail".
+
+15. "self_knowledge" — admin asking what Sam knows about THEM. e.g. "my
+    tools", "my notes", "what do you know about me".
+
+16. "self_tasks" — admin asking for THEIR OWN task list. e.g. "my
+    tasks", "what's on my list", "my todo".
+
+17. "meta_chat" — admin asking about Sam's capabilities/behavior. e.g.
+    "what can you do", "do you follow up on commitments", "will you
+    remind workers".
+
+18. "other" — anything else (casual chat, work check-in body text,
+    answering a previous question, low-confidence anything). Fall
+    through to conversational reply.
+
+CRITICAL RULES:
+- Speakers can be BOTH admin AND worker. If the message looks like a work
+  CHECK-IN (describing their own tasks, schedule, status updates with
+  bullet lists, "Logging in", "EOD", "Break"), classify as "other" so the
+  worker handlers process it. Only classify as admin intent when the
+  message is unambiguously an admin command directed at Sam.
+- Hannah typing "i just gave you my tasks for today and schedule" is
+  meta_chat, NOT task_list — she's talking ABOUT a thing she did, not
+  asking for a list.
+- A check-in body that contains the word "tasks" or "list" mid-message
+  is NOT a task_list query. Only short imperatives like "tasks for X"
+  or "X's tasks" qualify.
+- Match misspelled worker names to the closest roster name. If you
+  can't confidently identify a worker for an intent that needs one,
+  return "other".
+- For "forward" vs "relay": "when X logs in" / "next time X comes on"
+  / "tomorrow when X" = relay (is_deferred=true). Everything else with
+  a worker target = forward (is_deferred=false).
+
+START YOUR RESPONSE WITH the open-brace character. Output JSON ONLY, no
+preamble:
+
+{{
+  "intent": "...",
+  "worker": "...",
+  "second_worker": null,
+  "message_to_relay": null,
+  "estimated_time": null,
+  "is_deferred": false,
+  "time_off": null,
+  "confidence": "high|medium|low",
+  "reasoning": "one short sentence"
+}}
+"""
+
+    try:
+        data = _gemini_json(prompt, max_tokens=4096)
+    except Exception as e:
+        log.warning("route_admin_message failed: %s", e)
+        return None
+
+    valid_intents = {
+        "worker_status", "team_status", "task_list", "forward", "relay",
+        "automation_review", "learned_today", "digest_now", "time_off_log",
+        "benefits_query", "drive_audit", "intro_everyone", "share_capture",
+        "self_history", "self_knowledge", "self_tasks", "meta_chat", "other",
+    }
+    intent = str(data.get("intent", "")).strip().lower()
+    if intent not in valid_intents:
+        return None
+    conf = str(data.get("confidence", "low")).strip().lower()
+    if conf not in ("high", "medium", "low"):
+        conf = "low"
+    return {
+        "intent": intent,
+        "worker": (data.get("worker") or None) if isinstance(data.get("worker"), str) else None,
+        "second_worker": (data.get("second_worker") or None) if isinstance(data.get("second_worker"), str) else None,
+        "message_to_relay": (data.get("message_to_relay") or None) if isinstance(data.get("message_to_relay"), str) else None,
+        "estimated_time": (data.get("estimated_time") or None) if isinstance(data.get("estimated_time"), str) else None,
+        "is_deferred": bool(data.get("is_deferred", False)),
+        "time_off": data.get("time_off") if isinstance(data.get("time_off"), dict) else None,
+        "confidence": conf,
+        "reasoning": str(data.get("reasoning", "")).strip()[:200],
+    }
+
+
 def classify_admin_intent(message: str, worker_names: list[str]) -> dict | None:
     """Fuzzy intent classifier for admin messages that didn't match any regex.
     Returns one of:

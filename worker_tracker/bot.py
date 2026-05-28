@@ -337,6 +337,265 @@ def _worker_today_snapshot(worker: dict) -> dict:
     }
 
 
+def _dispatch_admin_intent(intent_result: dict, user_id: str, text: str,
+                            client, worker: dict | None,
+                            is_owner: bool, is_manager: bool) -> bool:
+    """LLM-routed admin intent dispatcher. Returns True if handled (caller
+    should return), False to fall through to worker / conversational paths.
+
+    Replaces the previous 12-pattern regex chain. Every admin intent now
+    flows through analyzer.route_admin_message → this dispatcher.
+    """
+    intent = intent_result.get("intent")
+    target_worker_name = intent_result.get("worker")
+    confidence = intent_result.get("confidence", "low")
+
+    # Resolve worker name to roster entry (fuzzy match as a safety net)
+    target: dict | None = None
+    if target_worker_name:
+        matches = _find_worker_by_name(target_worker_name)
+        if matches and len(matches) == 1:
+            target = matches[0]
+        elif matches and len(matches) > 1:
+            client.chat_postMessage(channel=user_id, text=(
+                f"multiple matches for '{target_worker_name}': "
+                f"{', '.join(w['name'] for w in matches)}. be more specific?"
+            ))
+            return True
+
+    # Low-confidence fall-through except for safe queries
+    if confidence == "low" and intent in ("forward", "relay", "time_off_log",
+                                            "intro_everyone", "drive_audit"):
+        return False  # Don't take destructive actions on low confidence
+
+    if intent == "worker_status" and target:
+        if is_manager and not is_owner and target["user_id"] in config.OWNER_SLACK_IDS:
+            client.chat_postMessage(channel=user_id, text=(
+                f"sorry, can't share that with you 🙅 owner-level only."
+            ))
+            return True
+        try:
+            snapshot = _format_worker_status(target)
+            client.chat_postMessage(channel=user_id, text=snapshot)
+        except sheets.RateLimited:
+            client.chat_postMessage(channel=user_id, text=(
+                f"give me a sec — Google's rate-limiting me. try again in ~30s 🙏"
+            ))
+        except Exception as e:
+            log.exception("worker_status dispatch failed")
+            client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+        return True
+
+    if intent == "team_status":
+        try:
+            client.chat_postMessage(channel=user_id, text=_format_team_status())
+        except sheets.RateLimited:
+            client.chat_postMessage(channel=user_id, text=(
+                f"give me a sec — Google's rate-limiting me. try again in ~30s 🙏"
+            ))
+        except Exception as e:
+            log.exception("team_status dispatch failed")
+            client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+        return True
+
+    if intent == "task_list" and target:
+        try:
+            client.chat_postMessage(channel=user_id, text=_format_task_list(target, audience="admin"))
+        except Exception as e:
+            log.exception("task_list dispatch failed")
+            client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+        return True
+
+    if intent == "forward" and target:
+        msg = intent_result.get("message_to_relay") or ""
+        if not msg.strip():
+            client.chat_postMessage(channel=user_id, text=(
+                f"want me to send something to {target['name'].split()[0]}? "
+                f"include the message in the same DM, like 'tell {target['name'].split()[0].lower()} <message>'."
+            ))
+            return True
+        if is_manager and not is_owner and target["user_id"] in config.OWNER_SLACK_IDS:
+            client.chat_postMessage(channel=user_id, text=(
+                f"can't relay messages to {target['name'].split()[0]} — owner-level only."
+            ))
+            return True
+        # Decide deliver-now vs queue for next login based on the worker's current state
+        today_local = _local_today(target)
+        already_on = LOGGED_IN_TODAY.get(target["user_id"]) == today_local
+        sender_name = WORKERS[user_id]["name"] if user_id in WORKERS else user_id
+        try:
+            if already_on:
+                client.chat_postMessage(channel=target["user_id"], text=msg)
+                sheets.append_event(target["name"], target["user_id"], "admin_forward",
+                                     f"from {sender_name}: {msg[:100]}", target["tz"])
+                client.chat_postMessage(channel=user_id, text=f"✓ sent to {target['name']}")
+            else:
+                # Worker is offline — queue via the deferred relay flow so they
+                # get the message when they next log in.
+                import uuid
+                from datetime import datetime as _dt
+                relay_id = "r-" + uuid.uuid4().hex[:8]
+                now_iso = _dt.now(timezone.utc).isoformat(timespec="seconds")
+                relay_row = [
+                    relay_id, now_iso, sender_name, user_id,
+                    target["name"], target["user_id"],
+                    msg, intent_result.get("estimated_time", "") or "",
+                    "pending", "", "", "", "",
+                ]
+                sheets.append_relay(relay_row)
+                client.chat_postMessage(channel=user_id, text=(
+                    f"{target['name'].split()[0]} is offline — queued for next login. "
+                    f"I'll ping you when they confirm it's done."
+                ))
+        except Exception as e:
+            log.exception("forward dispatch failed")
+            client.chat_postMessage(channel=user_id, text=f"failed to send: {e}")
+        return True
+
+    if intent == "relay" and target:
+        # Deferred — always queue regardless of current state
+        msg = intent_result.get("message_to_relay") or ""
+        est = intent_result.get("estimated_time") or ""
+        if not msg.strip():
+            return False
+        if is_manager and not is_owner and target["user_id"] in config.OWNER_SLACK_IDS:
+            client.chat_postMessage(channel=user_id, text=(
+                f"can't queue messages for {target['name'].split()[0]} — owner-level only."
+            ))
+            return True
+        import uuid
+        from datetime import datetime as _dt
+        sender_name = WORKERS[user_id]["name"] if user_id in WORKERS else user_id
+        relay_id = "r-" + uuid.uuid4().hex[:8]
+        now_iso = _dt.now(timezone.utc).isoformat(timespec="seconds")
+        relay_row = [
+            relay_id, now_iso, sender_name, user_id,
+            target["name"], target["user_id"],
+            msg, est, "pending", "", "", "", "",
+        ]
+        try:
+            sheets.append_relay(relay_row)
+            today_local = _local_today(target)
+            already_on = LOGGED_IN_TODAY.get(target["user_id"]) == today_local
+            est_blurb = f" (~{est})" if est else ""
+            if already_on:
+                _deliver_relay(target, [{
+                    "Relay ID": relay_id, "Message": msg,
+                    "Estimated Time": est, "From Name": sender_name,
+                }], client)
+                client.chat_postMessage(channel=user_id, text=(
+                    f"✓ {target['name'].split()[0]} is already online — sent now{est_blurb}. "
+                    f"I'll ping you when they confirm it's done."
+                ))
+            else:
+                client.chat_postMessage(channel=user_id, text=(
+                    f"✓ got it — I'll tell {target['name'].split()[0]} when they next log in{est_blurb}. "
+                    f"I'll ping you the moment they confirm it's done."
+                ))
+        except Exception as e:
+            log.exception("relay dispatch failed")
+            client.chat_postMessage(channel=user_id, text=f"queue write failed: {e}")
+        return True
+
+    if intent == "automation_review":
+        try:
+            client.chat_postMessage(channel=user_id, text="digging through the knowledge base… 🤖 give me a sec.")
+            from . import analyzer as _ana
+            if target:
+                kb = sheets.list_worker_knowledge(target["user_id"])
+                scope = target["name"].split()[0]
+            else:
+                kb = []
+                for w in WORKERS.values():
+                    if w["user_id"] in config.OWNER_SLACK_IDS:
+                        continue
+                    try:
+                        kb.extend(sheets.list_worker_knowledge(w["user_id"]))
+                    except Exception:
+                        pass
+                scope = "the team"
+            if not kb:
+                client.chat_postMessage(channel=user_id, text=(
+                    f"nothing in the knowledge base for {scope} yet — i need a few more days of "
+                    f"check-ins to gather process detail."
+                ))
+                return True
+            report_md = _ana.rank_automation_candidates(kb, scope_label=scope)
+            client.chat_postMessage(channel=user_id, text=report_md or "couldn't generate a report this time.")
+        except Exception as e:
+            log.exception("automation_review dispatch failed")
+            client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+        return True
+
+    if intent == "learned_today":
+        try:
+            client.chat_postMessage(channel=user_id, text=_format_learned_today())
+        except Exception as e:
+            log.exception("learned_today dispatch failed")
+            client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+        return True
+
+    if intent == "digest_now":
+        try:
+            client.chat_postMessage(channel=user_id, text="on it — building today's EOD digest now… 📊")
+            from . import report as _report
+            result = _report.send_daily_digest()
+            status = "✓" if result["slack"] else "✗"
+            client.chat_postMessage(channel=user_id, text=(
+                f"{status} digest sent · {result['workers']} workers"
+            ))
+        except Exception as e:
+            log.exception("digest_now dispatch failed")
+            client.chat_postMessage(channel=user_id, text=f"digest blew up: {e}")
+        return True
+
+    if intent == "self_tasks":
+        # Speaker wants their own task list. Works for any speaker.
+        speaker_worker = WORKERS.get(user_id)
+        if speaker_worker:
+            audience = "admin" if (is_owner or is_manager) else "worker"
+            try:
+                client.chat_postMessage(channel=user_id, text=_format_task_list(speaker_worker, audience=audience))
+            except Exception as e:
+                log.exception("self_tasks dispatch failed")
+                client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+        return True
+
+    if intent == "self_history":
+        speaker_worker = WORKERS.get(user_id)
+        if speaker_worker:
+            try:
+                client.chat_postMessage(channel=user_id, text=_format_self_history(speaker_worker, days_back=0))
+            except Exception as e:
+                log.exception("self_history dispatch failed")
+                client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+        return True
+
+    if intent == "self_knowledge":
+        speaker_worker = WORKERS.get(user_id)
+        if speaker_worker:
+            try:
+                client.chat_postMessage(channel=user_id, text=_format_worker_knowledge(speaker_worker))
+            except Exception as e:
+                log.exception("self_knowledge dispatch failed")
+                client.chat_postMessage(channel=user_id, text=f"hit an error: {e}")
+        return True
+
+    if intent == "share_capture":
+        PENDING_SHARE_CAPTURE[user_id] = datetime.now(timezone.utc)
+        try:
+            client.chat_postMessage(channel=user_id, text=(
+                f"go for it — drop the name, what it's for, the link if there is one, "
+                f"and any steps. i'll log it 🙌"
+            ))
+        except Exception:
+            pass
+        return True
+
+    # meta_chat and other → fall through to conversational reply
+    return False
+
+
 def _format_self_history(worker: dict, days_back: int = 0) -> str:
     """Return a worker's activity trail for their CURRENT or LAST shift.
 
@@ -1097,6 +1356,50 @@ def handle_message(event, client) -> None:
     is_owner = user_id in config.OWNER_SLACK_IDS
     is_manager = user_id in config.MANAGER_SLACK_IDS
     is_admin = is_owner or is_manager
+
+    # ─────────────────────────────────────────────────────────────────────
+    # LLM INTENT ROUTER (replaces the entire admin regex chain)
+    # ─────────────────────────────────────────────────────────────────────
+    # One Gemini call classifies the admin's intent and resolves the worker
+    # name (with typo + nickname tolerance) — eliminating the entire class
+    # of "regex matched the wrong word in a long message" bugs.
+    # The Activity-Log-side worker handlers (login/break/eod/hours/discrepancy)
+    # still run as regex BEFORE this — they're sub-100ms and unambiguous.
+    # Only NON-worker-keyword admin messages go through the LLM router.
+    if is_admin:
+        # Skip the LLM call for obvious worker-syntax messages from admin-workers
+        # (Hannah / Ger / etc.). Saves ~1s per message and a Gemini call.
+        looks_like_worker_action = (
+            len(text.strip()) < 20 and
+            (is_break_start(text) or is_break_end(text) or is_eod(text)
+             or is_hours_query(text) or is_discrepancy(text)
+             or text.strip().lower() in ("logging in", "login", "im in",
+                                            "i'm in", "starting", "hey",
+                                            "hi sam", "hello"))
+        )
+        if not looks_like_worker_action:
+            try:
+                speaker_first = (worker["name"].split()[0]
+                                  if worker and worker.get("name")
+                                  else "admin")
+                intent_result = analyzer.route_admin_message(
+                    message=text,
+                    roster=list(WORKERS.values()),
+                    is_owner=is_owner,
+                    is_manager=is_manager,
+                    speaker_first_name=speaker_first,
+                )
+            except Exception:
+                log.exception("LLM router crashed")
+                intent_result = None
+            if intent_result is not None:
+                log.info("LLM router: intent=%s worker=%s conf=%s",
+                         intent_result.get("intent"),
+                         intent_result.get("worker"),
+                         intent_result.get("confidence"))
+                if _dispatch_admin_intent(intent_result, user_id, text, client,
+                                            worker, is_owner, is_manager):
+                    return  # handled — done
 
     # Daily planning reply — fires only if this user was sent the planning question.
     # Check BEFORE admin-command parsing so a free-form planning reply doesn't
