@@ -359,6 +359,10 @@ TEAM_WIDE_PRONOUNS = frozenset({
     "everyone", "everybody", "anyone", "anybody", "the team", "team",
     "all", "all of them", "all of us", "the workers", "workers",
     "the squad", "squad", "the crew", "crew", "everyone's", "everybodys",
+    # Personal pronouns — when a worker says "my tasks" / "my list",
+    # the captured "name" is "my". Never look up a worker by that.
+    # Handler will fall through to the worker-self pattern.
+    "my", "me", "i", "your", "you", "yours", "mine", "ours",
 })
 
 
@@ -372,13 +376,16 @@ TASK_LIST_WORKER_PATTERNS = (
 )
 
 TASK_LIST_ADMIN_PATTERNS = (
-    # Admin asks Sam for a worker's task list
-    r"\b(?:tasks?|list|checklist|todo|to[\s-]?do|plate|queue)\s+(?:for|of)\s+([A-Za-z][\w'.-]{0,30})\b",
-    r"\b([A-Za-z][\w'.-]{0,30}?)(?:'s|s)\s+(?:tasks?|list|checklist|todo|to[\s-]?do|plate|queue)\b",
-    r"\bwhat(?:'s| is| are)?\s+(?:on\s+)?([A-Za-z][\w'.-]{0,30}?)(?:'s|s)?\s+(?:plate|list|checklist|todo)\b",
-    r"\bshow\s+(?:me\s+)?([A-Za-z][\w'.-]{0,30}?)(?:'s|s)?\s+(?:tasks?|list|checklist|todo)\b",
-    # Bare name followed by a task word — "rey checklist", "hannah todo"
-    r"\b([A-Za-z][\w'.-]{0,30}?)\s+(?:tasks?|list|checklist|todo|to[\s-]?do)\b",
+    # Admin asks Sam for a worker's task list. Patterns are ANCHORED at
+    # message START so a check-in body containing "10PM onwards Tasks:"
+    # or "my tasks for today" doesn't false-match. (Hannah "onward"/"my" bug.)
+    r"^\s*(?:tasks?|list|checklist|todo|to[\s-]?do|plate|queue)\s+(?:for|of)\s+([A-Za-z][\w'-]{0,24})\s*\??$",
+    # "hannahs tasks" / "hannah's tasks" / "rey list" — possessive optional
+    r"^\s*([A-Za-z][\w'-]{0,24}?)(?:'s|s'|'?s)?\s+(?:tasks?|list|checklist|todo|to[\s-]?do|plate|queue)\s*\??$",
+    # "whats on gers plate" / "what's on hannah's list"
+    r"^\s*what(?:'?s| is| are)?\s+(?:on\s+)?([A-Za-z][\w'-]{0,24}?)(?:'s|s'|'?s)?\s+(?:plate|list|checklist|todo)\s*\??$",
+    # "show me rey tasks" / "show hannah's list"
+    r"^\s*show\s+(?:me\s+)?([A-Za-z][\w'-]{0,24}?)(?:'s|s'|'?s)?\s+(?:tasks?|list|checklist|todo)\s*\??$",
 )
 
 
