@@ -509,6 +509,55 @@ def tool_get_learned_today(workers: list[dict]) -> dict:
     }
 
 
+def tool_get_all_benefits(workers: list[dict]) -> dict:
+    """Compact benefits table for every active worker — for comparisons.
+    Use when admin asks 'who has the most vacation days', 'compare PTO',
+    'who's eligible for 13th month', etc. ONE call returns everyone."""
+    rows = []
+    for w in workers:
+        if w["user_id"] in config.OWNER_SLACK_IDS:
+            continue
+        try:
+            year = datetime.now(ZoneInfo(w.get("tz") or "UTC")).year
+        except Exception:
+            year = datetime.now(timezone.utc).year
+        alloc = {
+            "vacation": int(w.get("vacation_days_year") or 0),
+            "sick": int(w.get("sick_days_year") or 0),
+            "holiday": int(w.get("holiday_days_year") or 0),
+            "pto": int(w.get("pto_days_year") or 0),
+        }
+        used = {"vacation": 0, "sick": 0, "pto": 0, "holiday": 0}
+        try:
+            for r in sheets.time_off_for_worker(w["user_id"], year=year):
+                t = (r.get("Type") or "").strip().lower()
+                if t in used:
+                    try:
+                        used[t] += int(r.get("Days") or 0)
+                    except (TypeError, ValueError):
+                        pass
+        except Exception:
+            pass
+        rows.append({
+            "name": w["name"],
+            "vacation_remaining": alloc["vacation"] - used["vacation"],
+            "sick_remaining": alloc["sick"] - used["sick"],
+            "holiday_remaining": alloc["holiday"] - used["holiday"],
+            "pto_remaining": alloc["pto"] - used["pto"],
+            "vacation_total": alloc["vacation"],
+            "sick_total": alloc["sick"],
+            "holiday_total": alloc["holiday"],
+            "pto_total": alloc["pto"],
+            "hmo_php": int(float(w.get("hmo_reimbursement_php") or 0)),
+            "calamity_php": int(float(w.get("calamity_fund_php") or 0)),
+            "perf_bonus_date": w.get("perf_bonus_date") or "",
+            "thirteenth_month_eligible": w.get("thirteenth_month_eligible") or "No",
+            "pay_schedule": w.get("pay_schedule") or "",
+            "hourly_rate": w.get("hourly_rate_contract") or "",
+        })
+    return {"workers": rows, "count": len(rows)}
+
+
 def tool_get_roster_summary(workers: list[dict]) -> dict:
     return {
         "active_workers": [
@@ -635,6 +684,19 @@ def _build_tools() -> list[types.Tool]:
             parameters=types.Schema(type=types.Type.OBJECT, properties={}),
         ),
         types.FunctionDeclaration(
+            name="get_all_benefits",
+            description=(
+                "Compact benefits table for EVERY active worker in one call. "
+                "Use for cross-worker comparisons: 'who has the most vacation days', "
+                "'who's eligible for 13th month', 'compare PTO across the team', "
+                "'who has the highest pay rate', 'list everyone's perf bonus dates'. "
+                "Returns one row per worker with vacation/sick/holiday/PTO remaining + "
+                "totals, plus HMO/calamity amounts, perf bonus date, 13th month, "
+                "pay schedule, hourly rate."
+            ),
+            parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+        ),
+        types.FunctionDeclaration(
             name="get_roster_summary",
             description=(
                 "Full list of active workers with their names, nicknames, timezones, and "
@@ -727,6 +789,7 @@ _TOOL_FUNCTIONS = {
     "get_worker_knowledge": lambda args, ctx: tool_get_worker_knowledge(args["name"], ctx["workers"]),
     "get_team_status": lambda args, ctx: tool_get_team_status(ctx["workers"]),
     "get_learned_today": lambda args, ctx: tool_get_learned_today(ctx["workers"]),
+    "get_all_benefits": lambda args, ctx: tool_get_all_benefits(ctx["workers"]),
     "get_roster_summary": lambda args, ctx: tool_get_roster_summary(ctx["workers"]),
     "log_time_off": lambda args, ctx: tool_log_time_off(
         args["name"], args.get("type", "vacation"),
@@ -795,6 +858,8 @@ EXAMPLES of right tool choice:
 - "what did hannah do today?" → get_worker_activity("hannah", "today")
 - "what was rey's specific tasks yesterday?" → get_worker_activity("rey", "yesterday")
 - "tasks for rey on may 28" → get_worker_activity("rey", "2026-05-28")
+- "what did rey do last week?" → get_worker_activity("rey", "last_week")
+- "summarize hannah's month" → get_worker_activity("hannah", "this_month")
 - "how many vacation days does rey have?" → get_worker_benefits("rey")
 - "how many hours has hannah worked this period?" → get_worker_hours("hannah", "current")
 - "did everyone log in today?" → get_team_status()
@@ -802,6 +867,16 @@ EXAMPLES of right tool choice:
 - "tell rey to upload the new thumbs" → queue_message_for_worker(rey, "...", deferred=false)
 - "when ger logs in remind her about wise" → queue_message_for_worker(ger, "...", deferred=true)
 - "log vacation for hannah dec 1-5" → log_time_off(...)
+
+ANSWERING BENEFITS QUESTIONS: when asked about vacation/sick/holiday/PTO,
+ALWAYS look at ALL allocation buckets, not just the literal one mentioned.
+Some workers have a separate vacation bucket; others have a single PTO
+bucket that covers vacation. If someone asks "vacation days" and the
+worker has 0 vacation but 7 PTO, EXPLAIN that — don't just say "0
+vacation". Example good answer:
+  "rey has 0 standalone vacation days but uses a PTO bucket — he's got
+   7 PTO days available this year (none used yet), plus 3 sick and 4
+   holiday days. so 7 days of paid time off."
 
 VOICE: like a real coworker. Acknowledge the substance of what they said.
 Don't say "i can help with that". Just answer. Match their energy: short
@@ -825,7 +900,7 @@ def agent_reply(
     is_owner: bool,
     is_manager: bool,
     workers: list[dict],
-    max_iterations: int = 6,
+    max_iterations: int = 10,
 ) -> str | None:
     """Run the tool-calling agent loop. Returns the final reply text, or
     None if the agent failed (caller can fall back to a canned message)."""

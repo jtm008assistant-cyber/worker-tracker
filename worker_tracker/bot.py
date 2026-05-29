@@ -3495,6 +3495,15 @@ def main() -> None:
     schedule_stale_break_sweep()
     schedule_prompt_watchdog()
     schedule_benefits_reminders()
+    # Verify agent module loads correctly at startup so a broken agent.py
+    # surfaces in Railway logs instead of silently failing on first DM.
+    try:
+        from . import agent as _agent_module
+        _ = _agent_module._build_tools()
+        log.info("Agent module loaded OK — %d tools registered",
+                  len(_agent_module._build_tools()[0].function_declarations))
+    except Exception:
+        log.exception("AGENT IMPORT FAILED — admin DMs will return errors")
     log.info("Starting Socket Mode handler. Ctrl-C to stop.")
     SocketModeHandler(_app, config.SLACK_APP_TOKEN).start()
 
