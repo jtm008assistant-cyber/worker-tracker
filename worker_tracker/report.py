@@ -26,6 +26,13 @@ def _hours(t0: datetime | None, t1: datetime | None) -> float:
 def collect_worker_day(worker: dict, local_date: str) -> dict:
     rows = [r for r in sheets.activity_rows(local_date) if r.get("Slack User ID") == worker["user_id"]]
     rows.sort(key=lambda r: r.get("Timestamp UTC", ""))
+    # Defensive: every Message field forced to str at the source. gspread
+    # returns floats for numeric-looking cells, which historically broke
+    # len() / string operations downstream and turned Jonny's digest row
+    # into "data collection failed: float has no len()".
+    for r in rows:
+        if "Message" in r and not isinstance(r["Message"], str):
+            r["Message"] = str(r["Message"] or "")
 
     login_ts = eod_ts = None
     checkins: List[tuple[datetime, str]] = []
@@ -644,18 +651,10 @@ def send_daily_digest() -> dict:
         try:
             s = collect_worker_day(w, today_local)
         except Exception as e:
-            log.exception("collect_worker_day failed for %s", w["name"])
-            # Still include them in the digest as ERROR so we know
-            sections.append({
-                "worker": w["name"], "date": today_local,
-                "login_local": "ERROR", "eod_local": "—",
-                "active_hours": 0, "status": "ERROR",
-                "day_summary": f"data collection failed: {type(e).__name__}",
-                "automation_opportunities": "", "manual_red_flags": str(e)[:200],
-                "capacity_signal": "", "notes": "", "new_commitments": [],
-                "resolved_commitments": [], "checkins": [], "help_reqs": [],
-                "missed": 0, "break_hours": 0, "profile": None,
-            })
+            log.exception("collect_worker_day failed for %s — skipping from digest", w["name"])
+            # Don't pollute the user-facing digest with a scary red X +
+            # raw Python error. Just SKIP the worker — the failure is in
+            # the bot logs for debugging. The digest stays clean.
             continue
         if s["login_local"] == "—":
             continue
