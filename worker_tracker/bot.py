@@ -2224,14 +2224,39 @@ def handle_message(event, client) -> None:
                     team_state = "(team data temporarily unavailable — Google Sheets is rate-limiting us)"
             else:
                 team_state = ""
-            reply = analyzer.conversational_reply(
-                message=text,
-                speaker_name=worker["name"],
-                is_owner=is_owner,
-                is_manager=is_manager and not is_owner,
-                is_worker=not (is_owner or is_manager),
-                team_state=team_state,
-            )
+
+            # ── Workers also get the tool-calling agent ──
+            # For workers, if the message is substantive (not a single-word
+            # ack and not a worker-keyword that was already handled by the
+            # fast-path), run the agent. Lets them say "I logout earlier at
+            # 7:44am" / "I took a break from 1-2pm" / "my hours" / "my tasks"
+            # naturally.
+            reply = None
+            if not is_admin and len(text.strip()) >= 8 and not is_break_start(text) \
+                    and not is_break_end(text) and not is_eod(text) \
+                    and not is_hours_query(text) and not is_discrepancy(text):
+                try:
+                    from . import agent as _worker_agent
+                    reply = _worker_agent.agent_reply(
+                        text=text,
+                        speaker_user_id=user_id,
+                        speaker_name=first,
+                        is_owner=False, is_manager=False,
+                        workers=list(WORKERS.values()),
+                    )
+                except Exception:
+                    log.exception("worker agent crashed")
+                    reply = None
+            # Fall back to the legacy conversational reply if agent didn't fire
+            if not reply:
+                reply = analyzer.conversational_reply(
+                    message=text,
+                    speaker_name=worker["name"],
+                    is_owner=is_owner,
+                    is_manager=is_manager and not is_owner,
+                    is_worker=not (is_owner or is_manager),
+                    team_state=team_state,
+                )
             if not reply and was_responding_to_prompt:
                 # Gemini SKIPped but we MUST ack — fallback canned thanks
                 reply = f"thanks for the update {first}! 🙌"

@@ -179,6 +179,10 @@ EOD_PATTERNS = (
     r"\beod\b",
     r"\blogging off\b", r"\blog off\b", r"\bsigning off\b",
     r"\blogging out\b", r"\blogged out\b",
+    # Logout variants — Ger said "Logout" and got the canned reply instead
+    # of being EOD'd. Adding common spellings + typos.
+    r"\blog\s?out\b", r"\blogout\b", r"\bloggout\b", r"\bloggin\s?out\b",
+    r"\blog\s*-?\s*out\b",
     r"\bdone for the day\b", r"\bdone for now\b",
     r"\bdone (?:with )?(?:my |the )?shift\b",        # "done my shift", "done with my shift"
     r"\bshift (?:done|over|ended|finished)\b",       # "shift over", "shift done"

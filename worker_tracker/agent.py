@@ -460,6 +460,146 @@ def tool_save_knowledge(worker_name: str, kind: str, name: str, url: str,
         return {"error": f"KB write failed: {e}"}
 
 
+def _write_activity_row(worker: dict, event_type: str, message: str,
+                         when_utc: datetime) -> None:
+    """Write a backdated Activity Log row at the specified UTC time."""
+    try:
+        tz = ZoneInfo(worker["tz"])
+    except Exception:
+        tz = ZoneInfo("UTC")
+    local = when_utc.astimezone(tz)
+    ws = sheets.open_tracker().worksheet(config.ACTIVITY_TAB)
+    ws.append_row([
+        when_utc.isoformat(timespec="seconds"),
+        local.date().isoformat(),
+        local.strftime("%H:%M:%S"),
+        worker["name"],
+        worker["user_id"],
+        event_type,
+        message,
+    ], value_input_option="USER_ENTERED")
+    try:
+        sheets.activity_rows.invalidate()  # type: ignore[attr-defined]
+        sheets.activity_since.invalidate()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
+def _parse_hhmm_today(hhmm: str, tz_name: str, date_iso: str | None = None) -> datetime | None:
+    """Parse 'HH:MM' or '7:44am' into a UTC datetime, anchored to today
+    (or the given local date) in the worker's TZ."""
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    s = (hhmm or "").strip().lower().replace(" ", "")
+    # Extract hour, minute, am/pm
+    import re as _re
+    m = _re.match(r"^(\d{1,2}):?(\d{0,2})\s*(am|pm)?$", s)
+    if not m:
+        return None
+    h = int(m.group(1))
+    mi = int(m.group(2) or 0)
+    ap = m.group(3)
+    if ap == "pm" and h < 12:
+        h += 12
+    elif ap == "am" and h == 12:
+        h = 0
+    if date_iso:
+        try:
+            base = date.fromisoformat(date_iso)
+        except Exception:
+            base = datetime.now(tz).date()
+    else:
+        base = datetime.now(tz).date()
+    local_dt = datetime(base.year, base.month, base.day, h, mi, 0, tzinfo=tz)
+    # If the result is in the future relative to "now", assume yesterday
+    if local_dt > datetime.now(tz):
+        local_dt -= timedelta(days=1)
+    return local_dt.astimezone(timezone.utc)
+
+
+def tool_log_retroactive_eod(name: str, time_hhmm: str, date_iso: str | None,
+                              workers: list[dict]) -> dict:
+    """Worker forgot to EOD and is now telling us when they stopped.
+    Logs an EOD event at the specified time."""
+    target = _resolve_worker(name, workers)
+    if not target:
+        return {"error": f"No worker matching '{name}'."}
+    when = _parse_hhmm_today(time_hhmm, target.get("tz", "UTC"), date_iso)
+    if not when:
+        return {"error": f"Couldn't parse time '{time_hhmm}'. Use HH:MM or '7:44am'."}
+    try:
+        _write_activity_row(target, "eod",
+            f"retroactive EOD: worker reported {time_hhmm}", when)
+        return {"ok": True, "logged": "eod", "worker": target["name"],
+                "utc_timestamp": when.isoformat(),
+                "local_time": time_hhmm}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def tool_log_retroactive_login(name: str, time_hhmm: str, date_iso: str | None,
+                                workers: list[dict]) -> dict:
+    """Worker started earlier than the message and is telling us when."""
+    target = _resolve_worker(name, workers)
+    if not target:
+        return {"error": f"No worker matching '{name}'."}
+    when = _parse_hhmm_today(time_hhmm, target.get("tz", "UTC"), date_iso)
+    if not when:
+        return {"error": f"Couldn't parse time '{time_hhmm}'."}
+    try:
+        _write_activity_row(target, "login",
+            f"retroactive login: worker reported start at {time_hhmm}", when)
+        return {"ok": True, "logged": "login", "worker": target["name"],
+                "utc_timestamp": when.isoformat(),
+                "local_time": time_hhmm}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def tool_log_retroactive_break(name: str, start_hhmm: str, end_hhmm: str,
+                                date_iso: str | None, workers: list[dict]) -> dict:
+    """Worker took a break and is now telling us. Logs break_start and break_end."""
+    target = _resolve_worker(name, workers)
+    if not target:
+        return {"error": f"No worker matching '{name}'."}
+    start = _parse_hhmm_today(start_hhmm, target.get("tz", "UTC"), date_iso)
+    end = _parse_hhmm_today(end_hhmm, target.get("tz", "UTC"), date_iso)
+    if not start or not end:
+        return {"error": "Couldn't parse times."}
+    if end <= start:
+        return {"error": "Break end must be after break start."}
+    try:
+        _write_activity_row(target, "break_start",
+            f"retroactive break start at {start_hhmm}", start)
+        dur_min = (end - start).total_seconds() / 60
+        _write_activity_row(target, "break_end",
+            f"retroactive break end at {end_hhmm} ({dur_min:.0f}min)", end)
+        return {"ok": True, "worker": target["name"],
+                "break_minutes": int(dur_min)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def tool_stop_checkin_prompts(name: str, reason: str, workers: list[dict]) -> dict:
+    """Stop the periodic check-in prompts for a worker (they've informally
+    indicated they're done for the day). Equivalent to marking them logged off."""
+    target = _resolve_worker(name, workers)
+    if not target:
+        return {"error": f"No worker matching '{name}'."}
+    # Write an EOD event so the scheduler stops + payroll math closes the shift
+    now_utc = datetime.now(timezone.utc)
+    try:
+        _write_activity_row(target, "eod",
+            f"check-in prompts stopped: {reason or 'worker indicated they were done'}",
+            now_utc)
+        return {"ok": True, "worker": target["name"],
+                "action": "logged as EOD at now; check-in prompts will stop"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def tool_send_eod_digest_now() -> dict:
     try:
         from . import report
@@ -769,6 +909,77 @@ def _build_tools() -> list[types.Tool]:
             ),
         ),
         types.FunctionDeclaration(
+            name="log_retroactive_eod",
+            description=(
+                "Worker says they already logged off / ended their shift earlier "
+                "but didn't tell Sam. Use when a worker says 'I already logout "
+                "earlier at 7:44am' / 'I ended at 6pm earlier' / 'I EOD'd at 5'. "
+                "Writes a backdated EOD event at the specified time."
+            ),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "name": types.Schema(type=types.Type.STRING,
+                        description="Worker name — usually the speaker themselves"),
+                    "time_hhmm": types.Schema(type=types.Type.STRING,
+                        description="Local time like '7:44am' or '18:30' or '6pm'"),
+                    "date_iso": types.Schema(type=types.Type.STRING,
+                        description="Optional YYYY-MM-DD if not today (worker's TZ)"),
+                },
+                required=["name", "time_hhmm"],
+            ),
+        ),
+        types.FunctionDeclaration(
+            name="log_retroactive_login",
+            description=(
+                "Worker says they started earlier than when they messaged Sam. "
+                "Use when a worker says 'I started my shift at 8am' or 'I came on "
+                "at 22:00 yesterday'. Writes a backdated login event."
+            ),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "name": types.Schema(type=types.Type.STRING),
+                    "time_hhmm": types.Schema(type=types.Type.STRING),
+                    "date_iso": types.Schema(type=types.Type.STRING),
+                },
+                required=["name", "time_hhmm"],
+            ),
+        ),
+        types.FunctionDeclaration(
+            name="log_retroactive_break",
+            description=(
+                "Worker tells Sam they took a break that wasn't logged. Use for "
+                "'I took a break from 1-2pm' / 'I was on lunch 12 to 1'."
+            ),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "name": types.Schema(type=types.Type.STRING),
+                    "start_hhmm": types.Schema(type=types.Type.STRING),
+                    "end_hhmm": types.Schema(type=types.Type.STRING),
+                    "date_iso": types.Schema(type=types.Type.STRING),
+                },
+                required=["name", "start_hhmm", "end_hhmm"],
+            ),
+        ),
+        types.FunctionDeclaration(
+            name="stop_checkin_prompts",
+            description=(
+                "Stop the periodic check-in prompts for a worker. Writes an EOD "
+                "event at now. Use when a worker says they're done but didn't "
+                "give a specific earlier time."
+            ),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "name": types.Schema(type=types.Type.STRING),
+                    "reason": types.Schema(type=types.Type.STRING),
+                },
+                required=["name"],
+            ),
+        ),
+        types.FunctionDeclaration(
             name="send_eod_digest_now",
             description=(
                 "Trigger the end-of-day digest immediately. Use when admin says 'send digest', "
@@ -803,6 +1014,15 @@ _TOOL_FUNCTIONS = {
         args["worker_name"], args.get("kind", "tool"), args["name"],
         args.get("url", ""), args["description"], args.get("steps", ""),
         ctx["workers"]),
+    "log_retroactive_eod": lambda args, ctx: tool_log_retroactive_eod(
+        args["name"], args["time_hhmm"], args.get("date_iso"), ctx["workers"]),
+    "log_retroactive_login": lambda args, ctx: tool_log_retroactive_login(
+        args["name"], args["time_hhmm"], args.get("date_iso"), ctx["workers"]),
+    "log_retroactive_break": lambda args, ctx: tool_log_retroactive_break(
+        args["name"], args["start_hhmm"], args["end_hhmm"],
+        args.get("date_iso"), ctx["workers"]),
+    "stop_checkin_prompts": lambda args, ctx: tool_stop_checkin_prompts(
+        args["name"], args.get("reason", ""), ctx["workers"]),
     "send_eod_digest_now": lambda args, ctx: tool_send_eod_digest_now(),
 }
 
@@ -890,6 +1110,21 @@ If the speaker mentions a tool/sheet/process/person/url that's clearly a
 NEW workflow detail (not already logged), call save_knowledge to capture
 it for that worker (use the speaker's name unless they were clearly
 referring to another worker).
+
+WORKER-FACING RETROACTIVE ACTIONS:
+If the SPEAKER is a worker (not admin) and they're telling you about a
+time-tracking event they forgot to log:
+- "i already logout earlier at 7:44am" → log_retroactive_eod(<speaker>, "7:44am")
+- "i started my shift at 22:00 yesterday" → log_retroactive_login(<speaker>, "22:00", date_iso=yesterday)
+- "i took a break from 1-2pm" → log_retroactive_break(<speaker>, "1pm", "2pm")
+- "i'm done for the day" → stop_checkin_prompts(<speaker>, "worker said done")
+After logging, confirm warmly — "got it, logged you out at 7:44am 🙌"
+
+For workers asking about their OWN data ("my hours", "what did i do", "my
+benefits"), call the matching tool with the speaker's name.
+
+For workers asking about OTHER workers — politely decline. Workers can
+only see their own data unless they're an admin.
 """
 
 
