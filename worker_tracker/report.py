@@ -36,7 +36,9 @@ def collect_worker_day(worker: dict, local_date: str) -> dict:
     for r in rows:
         ts = _parse_ts(r["Timestamp UTC"])
         t = r["Type"]
-        msg = r.get("Message", "")
+        # Always coerce to str — gspread can return floats/ints for numeric
+        # cells which breaks downstream len()/string ops.
+        msg = str(r.get("Message", "") or "")
         if t == "login" and not login_ts:
             login_ts = ts
         elif t == "eod":
@@ -85,7 +87,10 @@ def collect_worker_day(worker: dict, local_date: str) -> dict:
             status = "Possible slack"
         notes.append(f"{missed} missed prompt(s)")
     if checkins:
-        avg_len = sum(len(m) for _, m in checkins) / len(checkins)
+        # Coerce to str — gspread sometimes returns floats for numeric-looking
+        # cells (e.g. "3.5" → 3.5), which breaks len(). Jonny's digest hit
+        # this with "object of type 'float' has no len()".
+        avg_len = sum(len(str(m or "")) for _, m in checkins) / len(checkins)
         if avg_len < 25 and status == "OK":
             status = "Possible slack"
             notes.append(f"avg reply {avg_len:.0f} chars")
@@ -561,7 +566,7 @@ def _build_slack_digest_text(today_local: str, sections: list[dict]) -> str:
                 lines.append(f"  :pushpin: _committed: {'; '.join(str(x)[:100] for x in nc[:3])}_")
         lines.append("")
 
-    lines.append("_Full email digest (with check-in trails) was also sent. DM Sam 'send digest' anytime to force a fresh one._")
+    lines.append("_DM me 'send digest' to force a fresh one anytime, or ask 'what did <name> do today' for a per-worker recap with their full check-in trail._")
     return "\n".join(lines)
 
 

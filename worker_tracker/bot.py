@@ -1377,8 +1377,12 @@ def handle_message(event, client) -> None:
         if not looks_like_worker_action:
             try:
                 from . import agent as _agent
-                speaker_first = (worker["name"].split()[0]
-                                  if worker and worker.get("name")
+                # Use WORKERS.get directly — `worker` may not be bound yet
+                # at this point in handle_message (it's assigned later).
+                # This was the UnboundLocalError Jan saw.
+                _speaker_w = WORKERS.get(user_id)
+                speaker_first = (_speaker_w["name"].split()[0]
+                                  if _speaker_w and _speaker_w.get("name")
                                   else "admin")
                 reply = _agent.agent_reply(
                     text=text,

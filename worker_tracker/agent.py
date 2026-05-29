@@ -991,13 +991,31 @@ def _build_tools() -> list[types.Tool]:
     return [types.Tool(function_declarations=decls)]
 
 
+def _gate_worker_lookup(args, ctx, tool_fn):
+    """Permission gate: workers can query peer workers, NOT owners.
+    Owners/managers can query anyone."""
+    target_name = args.get("name") or args.get("worker_name") or args.get("to_name")
+    if target_name and not ctx.get("is_speaker_admin"):
+        target = _resolve_worker(target_name, ctx["workers"])
+        if target and target["user_id"] in config.OWNER_SLACK_IDS:
+            return {"error": "Owner-level data is restricted to admins. "
+                              "Ask Jan or Ideen directly."}
+    return tool_fn(args, ctx)
+
+
 _TOOL_FUNCTIONS = {
-    "get_worker_status": lambda args, ctx: tool_get_worker_status(args["name"], ctx["workers"]),
-    "get_worker_activity": lambda args, ctx: tool_get_worker_activity(args["name"], args.get("when", "today"), ctx["workers"]),
-    "get_worker_hours": lambda args, ctx: tool_get_worker_hours(args["name"], args.get("period", "current"), ctx["workers"]),
-    "get_worker_benefits": lambda args, ctx: tool_get_worker_benefits(args["name"], ctx["workers"]),
-    "get_worker_open_tasks": lambda args, ctx: tool_get_worker_open_tasks(args["name"], ctx["workers"]),
-    "get_worker_knowledge": lambda args, ctx: tool_get_worker_knowledge(args["name"], ctx["workers"]),
+    "get_worker_status": lambda args, ctx: _gate_worker_lookup(args, ctx,
+        lambda a, c: tool_get_worker_status(a["name"], c["workers"])),
+    "get_worker_activity": lambda args, ctx: _gate_worker_lookup(args, ctx,
+        lambda a, c: tool_get_worker_activity(a["name"], a.get("when", "today"), c["workers"])),
+    "get_worker_hours": lambda args, ctx: _gate_worker_lookup(args, ctx,
+        lambda a, c: tool_get_worker_hours(a["name"], a.get("period", "current"), c["workers"])),
+    "get_worker_benefits": lambda args, ctx: _gate_worker_lookup(args, ctx,
+        lambda a, c: tool_get_worker_benefits(a["name"], c["workers"])),
+    "get_worker_open_tasks": lambda args, ctx: _gate_worker_lookup(args, ctx,
+        lambda a, c: tool_get_worker_open_tasks(a["name"], c["workers"])),
+    "get_worker_knowledge": lambda args, ctx: _gate_worker_lookup(args, ctx,
+        lambda a, c: tool_get_worker_knowledge(a["name"], c["workers"])),
     "get_team_status": lambda args, ctx: tool_get_team_status(ctx["workers"]),
     "get_learned_today": lambda args, ctx: tool_get_learned_today(ctx["workers"]),
     "get_all_benefits": lambda args, ctx: tool_get_all_benefits(ctx["workers"]),
@@ -1123,8 +1141,17 @@ After logging, confirm warmly — "got it, logged you out at 7:44am 🙌"
 For workers asking about their OWN data ("my hours", "what did i do", "my
 benefits"), call the matching tool with the speaker's name.
 
-For workers asking about OTHER workers — politely decline. Workers can
-only see their own data unless they're an admin.
+WORKER → OTHER WORKER queries are ALLOWED for peer workers (Hannah, Rey,
+Ger, Janina, Norks, Jonny). They can ask "is rey working", "what's
+hannah's vacation", "team status", etc. The roster is small and the team
+operates collaboratively.
+
+The ONLY thing workers can NOT see is data about OWNERS (Jan, Ideen). If
+a worker asks about an owner by name, politely decline:
+"i don't share owner-level data with workers — can ask Jan directly."
+
+You'll know who's an owner from the SPEAKER role context above and from
+get_roster_summary if you need to check.
 """
 
 
@@ -1160,6 +1187,7 @@ def agent_reply(
     ctx = {
         "workers": workers, "speaker_id": speaker_user_id,
         "speaker_name": speaker_name,
+        "is_speaker_admin": is_owner or is_manager,
     }
 
     try:
