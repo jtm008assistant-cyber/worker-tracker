@@ -1358,14 +1358,15 @@ def handle_message(event, client) -> None:
     is_admin = is_owner or is_manager
 
     # ─────────────────────────────────────────────────────────────────────
-    # TOOL-CALLING AGENT (replaces the entire admin intent dispatcher)
+    # UNIFIED 3-TIER ROUTER (router.py)
     # ─────────────────────────────────────────────────────────────────────
-    # For every non-worker-action message from an admin, run the agent loop.
-    # The agent has tools to look up real data (status, activity, KB,
-    # benefits, hours, tasks, team state, learned-today, roster) and write
-    # actions (log time off, queue message, save knowledge, send digest).
-    # It keeps conversation memory per speaker, so pronouns like "his",
-    # "her", "they", "yesterday's question" resolve naturally.
+    # Tier 1: deterministic commands (sub-100ms, no LLM)
+    # Tier 2: Sonnet 4.5 tool-calling agent (natural conversation, real data)
+    # Tier 3: keyword guess + direct sheet lookup (when Sonnet unreachable)
+    #
+    # Whichever tier produces a reply first is sent. The router NEVER raises
+    # and NEVER returns empty for admins. Replaces both the legacy admin
+    # dispatcher and the worker conversational reply path.
     if is_admin:
         looks_like_worker_action = (
             len(text.strip()) < 25 and
@@ -1376,15 +1377,12 @@ def handle_message(event, client) -> None:
         )
         if not looks_like_worker_action:
             try:
-                from . import agent as _agent
-                # Use WORKERS.get directly — `worker` may not be bound yet
-                # at this point in handle_message (it's assigned later).
-                # This was the UnboundLocalError Jan saw.
+                from . import router as _router
                 _speaker_w = WORKERS.get(user_id)
                 speaker_first = (_speaker_w["name"].split()[0]
                                   if _speaker_w and _speaker_w.get("name")
                                   else "admin")
-                reply = _agent.agent_reply(
+                reply = _router.route(
                     text=text,
                     speaker_user_id=user_id,
                     speaker_name=speaker_first,
@@ -1393,15 +1391,15 @@ def handle_message(event, client) -> None:
                     workers=list(WORKERS.values()),
                 )
             except Exception as e:
-                log.exception("agent crashed")
-                reply = f"agent hit an error: {type(e).__name__}: {e}"
-            # The agent ALWAYS owns the response for admins. If it returns
-            # a non-empty string we send that. If it returns None or empty
-            # for any reason, we send a clear "stuck" message — but we
-            # DO NOT fall through to the legacy handlers / canned text.
-            # That's how the "yeah — task relays..." canned reply was
-            # leaking through and embarrassing us.
-            if not reply:
+                log.exception("router crashed entirely")
+                reply = (f"hey — something's gone sideways. try again in a "
+                         f"sec? ({type(e).__name__})")
+            if reply:
+                _dm(client, user_id, reply, event_type="sam_router_reply")
+                return  # handled by router (Tier 1/2/3) — done
+            # Router returned empty (should be rare since Tier 3 always
+            # returns something). Continue to legacy path as safety net.
+            if False:  # disabled — keeping old fallback path dead
                 reply = (
                     f"hmm — couldn't pull a clean answer this time. "
                     f"can you rephrase or give me a specific worker name?"
@@ -2236,12 +2234,17 @@ def handle_message(event, client) -> None:
             # 7:44am" / "I took a break from 1-2pm" / "my hours" / "my tasks"
             # naturally.
             reply = None
+            # WORKERS go through the same 3-tier router as admins. They
+            # can ask about their own data ("my hours", "my benefits"),
+            # peer workers ("is rey working"), share processes, etc.
+            # Skip if it's a worker keyword that was already handled by
+            # the fast-path above.
             if not is_admin and len(text.strip()) >= 8 and not is_break_start(text) \
                     and not is_break_end(text) and not is_eod(text) \
                     and not is_hours_query(text) and not is_discrepancy(text):
                 try:
-                    from . import agent as _worker_agent
-                    reply = _worker_agent.agent_reply(
+                    from . import router as _router
+                    reply = _router.route(
                         text=text,
                         speaker_user_id=user_id,
                         speaker_name=first,
@@ -2249,9 +2252,11 @@ def handle_message(event, client) -> None:
                         workers=list(WORKERS.values()),
                     )
                 except Exception:
-                    log.exception("worker agent crashed")
+                    log.exception("router crashed for worker")
                     reply = None
-            # Fall back to the legacy conversational reply if agent didn't fire
+            # Fall back to the legacy conversational reply ONLY if the
+            # router returned nothing (rare — Tier 3 always returns
+            # something). This is just a safety net.
             if not reply:
                 reply = analyzer.conversational_reply(
                     message=text,
